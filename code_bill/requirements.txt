@@ -7,3 +7,6 @@ scikit-learn
 matplotlib
 lxml
 tqdm
+pytorch_lightning
+transformers
+gensim
