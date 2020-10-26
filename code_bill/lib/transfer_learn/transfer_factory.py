@@ -3,6 +3,7 @@ from tinydb import TinyDB, Query
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
 from dataclasses import asdict
 import os
 
@@ -67,14 +68,17 @@ class TransferFactory():
             mode='min'
         )
         self.ckp_cb = ckp_cb
+
+        logger = TensorBoardLogger(settings.checkpoint+'/transfer_logs/', name='my_model',version=f'{p}')
+
         self.trainer = pl.Trainer(gpus=1, 
                             max_epochs=50,
                             progress_bar_refresh_rate=20,
                             flush_logs_every_n_steps=100,
                             callbacks=[es_cb],
                             checkpoint_callback=ckp_cb,
-                            default_root_dir=settings.checkpoint)
-
+                            default_root_dir=settings.checkpoint,
+                            logger=logger)
 
     def run(self):
         for p in self.pg.gen():
