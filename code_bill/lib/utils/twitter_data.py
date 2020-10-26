@@ -32,7 +32,7 @@ class TwitterData(pl.LightningDataModule):
         self.test_batch_size = test_batch_size
         self.n_class = 4
         self.split_type = split_type
-        if self.split_type not in ['1516','tv','tvt','15:tvt','16:tvt']:
+        if self.split_type not in ['1516','tv','tvt','15_tvt','16_tvt']:
             print('warning: split_type invalid!')
             self.split_type = '641620'
 
@@ -136,7 +136,7 @@ class TwitterData(pl.LightningDataModule):
             self.train = [[data, label] for data, label in zip(X_train, y_train)]
             self.val = [[data, label] for data, label in zip(X_val, y_val)]
             self.test = [[data, label] for data, label in zip(X_test, y_test)]
-        if split_type == '15:tvt':
+        if split_type == '15_tvt':
             X_train, X_test, y_train, y_test = train_test_split(
                 self.tw15_X, self.tw15_y, train_size=0.8, random_state=1, shuffle=True, stratify= self.tw15_y)
 
@@ -147,7 +147,7 @@ class TwitterData(pl.LightningDataModule):
             self.val = [[data, label] for data, label in zip(X_val, y_val)]
             self.test = [[data, label] for data, label in zip(X_test, y_test)]
 
-        if split_type == '16:tvt':
+        if split_type == '16_tvt':
             X_train, X_test, y_train, y_test = train_test_split(
                 self.tw16_X, self.tw16_y, train_size=0.8, random_state=1, shuffle=True, stratify=self.tw16_y)
 

@@ -14,7 +14,7 @@ from pytorch_lightning.metrics.functional.classification import \
     confusion_matrix
 from transformers import AdamW, BertModel, get_linear_schedule_with_warmup
 import torchvision.models as models
-from tinydb import TinyDB, Query
+from lib.settings.config import settings
 
 class BertMNLIFinetuner(pl.LightningModule):
     models.resnet101()
@@ -34,11 +34,10 @@ class BertMNLIFinetuner(pl.LightningModule):
         super(BertMNLIFinetuner, self).__init__()
         self.save_hyperparameters()
         self.pretrain_model_name = pretrain_model_name
-        self.split_type = '16:tvt'
+        self.split_type = split_type
         self.twdata = TwitterData(
-            '../../rumor_detection_acl2017', self.pretrain_model_name, split_type=self.split_type)
+            settings.data, self.pretrain_model_name, split_type=self.split_type)
         
-        self.db = TinyDB('./checkpoint/training_results.json')
         self.freeze_type = freeze_type
         self.layer_num = layer_num
         

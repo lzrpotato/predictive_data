@@ -44,7 +44,6 @@ class Status():
         return existed
 
 
-
 class TransferFactory():
     def __init__(self):
         #self.set_config()
@@ -60,6 +59,7 @@ class TransferFactory():
             patience=12,
             mode='min',
         )
+        
         
         ckp_cb = ModelCheckpoint(
             monitor='val_loss',
