@@ -2,22 +2,13 @@ from lib.utils import TwitterData, CleanData
 import pandas as pd
 import gensim.downloader as api
 from gensim.models import KeyedVectors
-from lib.models.bert import BertMNLIFinetuner
-import pytorch_lightning as pl
+from lib.transfer_learn.transfer_factory import TransferFactory
 
-def main():
-    import os
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
-    pl.seed_everything(1234)
-    model = BertMNLIFinetuner('bert-base-cased')
-    model.setup('fit')
-    trainer = pl.Trainer(max_epochs=100)
-    trainer.fit(model)
+def test_tf():
+    tf = TransferFactory()
+    tf.run()
 
-    result = trainer.test(model)
-    print(result)
-    
 def test():
     dataset = TwitterData('../../rumor_detection_acl2017')
     cdf = CleanData()
@@ -41,5 +32,28 @@ def test():
     oov = cdf.check_coverage(vocab,wv_form_text)
     print(oov[:20])
 
+def tokenizer_test():
+    from transformers import AutoTokenizer
+    import numpy as np
+    pretrain_tokenizer_model = 'bert-base-cased'
+
+    dataset = TwitterData('../../rumor_detection_acl2017',pretrain_tokenizer_model)
+    dataset.prepare_data()
+    dataset.setup()
+    tokenizer = AutoTokenizer.from_pretrained(pretrain_tokenizer_model, use_fast=True)
+    
+    batch = tokenizer(list(dataset.tw15_X))
+    count = 0
+    for i, ids in enumerate(batch['input_ids']):
+        unc =  np.count_nonzero(np.array(ids) == 100)
+        if unc != 0:
+            print(ids)
+            print(dataset.tw15_X[i])
+            print(tokenizer.decode(ids))
+            print('****')
+        count += unc
+    print(count)
+
 if __name__ == '__main__':
-    main()
+    test_tf()
+    #tokenizer_test()

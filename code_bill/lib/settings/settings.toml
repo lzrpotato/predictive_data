@@ -1,0 +1,10 @@
+checkpoint = './checkpoint/'
+
+[transfer]
+dbname = 'status_db.json'
+    [transfer.param]
+    layer_num = [1,2,3]
+    freeze_type = ['all', 'no', 'half']
+    pretrain_model = ['bert-base-cased']
+    #split_type = ['1516','tt','tvt','15:tvt','16:tvt']
+    split_type = ['tvt','15:tvt','16:tvt']
