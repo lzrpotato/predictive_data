@@ -4,6 +4,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint
 from dataclasses import asdict
+import os
 
 from lib.settings.config import settings
 from lib.transfer_learn.param import Param, ParamGenerator
@@ -14,7 +15,7 @@ __all__ = ['TransferFactory']
 class Status():
     def __init__(self):
         self.dbpath = settings.checkpoint + settings.transfer.dbname
-        self.db = TinyDB(self.dbpath)
+        self.db = TinyDB(self.dbpath, sort_keys=True,indent='\t',separators=(',',': '))
 
     def save_state(self, p, result):
         metrics = ['train_acc_mean','val_acc_mean','test_acc_mean']
@@ -48,19 +49,19 @@ class TransferFactory():
         #self.set_config()
         self.pg = ParamGenerator()
         self.status = Status()
-
-    def set_config(self):
-        import os
+        
+    def set_config(self, p):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         pl.seed_everything(1234)
 
         es_cb = EarlyStopping(
-            monitor='train_loss',
+            monitor='val_loss',
             patience=12,
             mode='min',
         )
+        
         ckp_cb = ModelCheckpoint(
-            monitor='train_loss',
+            monitor='val_loss',
             filepath= settings.checkpoint + 'bert-best-model-{epoch:02d}-{train_loss:.2f}',
             save_top_k=1,
             mode='min'
@@ -77,10 +78,10 @@ class TransferFactory():
 
     def run(self):
         for p in self.pg.gen():
-            
+            print(p)
             if self.check_state(p):
                 continue
-            
+            self.set_config(p)
             model = BertMNLIFinetuner(
                     p.pretrain_model,
                     layer_num=p.layer_num,
@@ -94,10 +95,13 @@ class TransferFactory():
             model.load_from_checkpoint(self.ckp_cb.best_model_path)
             test_result = self.trainer.test(model)
             
+            print('rm file', self.ckp_cb.best_model_path)
+            os.remove(self.ckp_cb.best_model_path)
+
             self.save_state(p, test_result[0])
             
     def save_state(self, p: Param, result: dict):
         self.status.save_state(p, result)
 
     def check_state(self, p: Param):
-        self.status.check_state(p)
+        return self.status.check_state(p)

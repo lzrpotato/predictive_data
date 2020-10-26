@@ -17,7 +17,7 @@ import torchvision.models as models
 from tinydb import TinyDB, Query
 
 class BertMNLIFinetuner(pl.LightningModule):
-    models.vgg16()
+    models.resnet101()
     def __init__(self,
                  pretrain_model_name,
                  learning_rate=2e-5,
@@ -50,11 +50,11 @@ class BertMNLIFinetuner(pl.LightningModule):
         self.num_classes = self.twdata.n_class
         
         
-        self.classifier = self.classifier(self.layer_num)
+        self.classifier = self.make_classifier(self.layer_num)
         
         self.freeze_layer(freeze_type)
 
-    def classifier(self, layer_num=1):
+    def make_classifier(self, layer_num=1):
         layers = []
         sz = self.bert.config.hidden_size
         for l in range(layer_num-1):
@@ -64,7 +64,7 @@ class BertMNLIFinetuner(pl.LightningModule):
             sz //= 2
         
         layers += [nn.Linear(sz, self.num_classes)]
-        return nn.Sequential(layers)
+        return nn.Sequential(*layers)
 
     def freeze_layer(self, freeze_type):
         if freeze_type == 'all':
@@ -122,7 +122,7 @@ class BertMNLIFinetuner(pl.LightningModule):
 
         self.log(f'{phase}_loss_mean', loss_mean.cpu().detach().numpy())
         self.log(f'{phase}_acc_mean', acc_mean.cpu().detach().numpy())
-        print(cm)
+        #print(cm)
 
     def training_step(self, batch, batch_nb):
         return self.shared_my_step(batch, batch_nb, 'train')
