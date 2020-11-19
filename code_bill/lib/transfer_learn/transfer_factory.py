@@ -1,14 +1,14 @@
-from lib.models.bert import BertMNLIFinetuner
-from tinydb import TinyDB, Query
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
-from dataclasses import asdict
 import os
+from dataclasses import asdict
 
+import pytorch_lightning as pl
+from lib.models.bert import BertMNLIFinetuner
 from lib.settings.config import settings
 from lib.transfer_learn.param import Param, ParamGenerator
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
+from tinydb import Query, TinyDB
 
 __all__ = ['TransferFactory']
 
@@ -19,7 +19,7 @@ class Status():
         self.db = TinyDB(self.dbpath, sort_keys=True,indent='\t',separators=(',',': '))
 
     def save_state(self, p, result):
-        metrics = ['train_acc_mean','val_acc_mean','test_acc_mean']
+        metrics = ['train_acc_epoch','val_acc_epoch','test_acc_epoch']
         nr = {}
         for metric in metrics:
             nr[metric] = float(result[metric])
@@ -35,7 +35,9 @@ class Status():
             (pq.layer_num==p.layer_num) \
             & (pq.freeze_type == p.freeze_type) \
             & (pq.pretrain_model == p.pretrain_model) \
-            & (pq.split_type == p.split_type)
+            & (pq.split_type == p.split_type) \
+            & (pq.tree == p.tree) \
+            & (pq.max_tree_len == p.max_tree_len)
         )
         
         if res == []:
@@ -50,35 +52,43 @@ class TransferFactory():
         self.pg = ParamGenerator()
         self.status = Status()
         
-    def set_config(self, p):
+    def set_config(self, p: Param):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         pl.seed_everything(1234)
 
         es_cb = EarlyStopping(
-            monitor='val_loss',
-            patience=12,
+            monitor='val_loss_epoch',
+            patience=15,
             mode='min',
         )
         
-        
         ckp_cb = ModelCheckpoint(
-            monitor='val_loss',
-            filepath= settings.checkpoint + 'bert-best-model-{epoch:02d}-{train_loss:.2f}',
+            monitor='val_loss_epoch',
+            dirpath=settings.checkpoint,
+            filename='bert-best-model-{epoch:02d}-{train_loss:.2f}',
             save_top_k=1,
             mode='min'
         )
         self.ckp_cb = ckp_cb
+        comet_logger = CometLogger(
+            api_key=os.environ.get('COMET_API_KEY'),
+            workspace=os.environ.get('COMET_WORKSPACE'),  # Optional
+            save_dir='./comet_logging/',  # Optional
+            project_name='fakenews',  # Optional
+            experiment_name=f'{p.split_type}-{p.tree}-{p.max_tree_len}-{p.layer_num}',  # Optional
+            offline=False,
+        )
+        lr_monitor = LearningRateMonitor(
+            logging_interval='epoch',
 
-        logger = TensorBoardLogger(settings.checkpoint+'/transfer_logs/', name='my_model',version=f'{p}')
+        )
 
         self.trainer = pl.Trainer(gpus=1, 
                             max_epochs=50,
-                            progress_bar_refresh_rate=20,
+                            progress_bar_refresh_rate=1,
                             flush_logs_every_n_steps=100,
-                            callbacks=[es_cb],
-                            checkpoint_callback=ckp_cb,
-                            default_root_dir=settings.checkpoint,
-                            logger=logger)
+                            callbacks=[es_cb,ckp_cb,lr_monitor],
+                            logger=comet_logger)
 
     def run(self):
         for p in self.pg.gen():
@@ -89,6 +99,8 @@ class TransferFactory():
             model = BertMNLIFinetuner(
                     p.pretrain_model,
                     layer_num=p.layer_num,
+                    tree=p.tree,
+                    max_tree_length=p.max_tree_len,
                     freeze_type=p.freeze_type,
                     split_type=p.split_type,
                 )
