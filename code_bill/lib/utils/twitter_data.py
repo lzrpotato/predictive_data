@@ -3,13 +3,12 @@ import os
 from dataclasses import dataclass
 
 import numpy as np
-import pandas as pd
 import pytorch_lightning as pl
 import torch
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
-from anytree import Node, RenderTree, PreOrderIter
+from anytree import Node, RenderTree, PreOrderIter, LevelOrderIter
 import ast
 from lib.settings.config import settings
 from tqdm import tqdm
@@ -35,14 +34,14 @@ class MyNode():
     def __repr__(self):
         return str(self.sid) + '_' + str(self.t)
 
-class TwitterData(pl.LightningDataModule):
+class TwitterData():
     def __init__(
         self,
-        rootpath,
+        rootpath=settings.data,
         pretrain_tokenizer_model='bert-base-cased',
         tree=True,
         max_seq_length=128,
-        max_tree_length=500,
+        max_tree_length=100,
         train_batch_size=32,
         val_batch_size=32,
         test_batch_size=32,
@@ -331,7 +330,7 @@ class TwitterData(pl.LightningDataModule):
             root_t = root.name.t
             encoding = []
 
-            for i, node in enumerate(PreOrderIter(root)):
+            for i, node in enumerate(LevelOrderIter(root)):
                 if max_length != -1 and i >= max_length:
                     break
                 

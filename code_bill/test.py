@@ -1,15 +1,14 @@
-from lib.utils import TwitterData, CleanData
 import pandas as pd
-import gensim.downloader as api
 from gensim.models import KeyedVectors
-from lib.transfer_learn.transfer_factory import TransferFactory
-
     
 def test_tf():
+    os.environ["COMET_MODE"] = 'DISABLE'
+    from lib.transfer_learn.transfer_factory import TransferFactory
     tf = TransferFactory()
     tf.run()
 
 def test():
+    from lib.utils import TwitterData, CleanData
     dataset = TwitterData('../../rumor_detection_acl2017')
     cdf = CleanData()
     build_vab = cdf.build_vocab

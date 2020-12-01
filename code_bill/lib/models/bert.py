@@ -2,24 +2,27 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from typing import Any, List, Union
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import StepLR
-from torch.optim.sgd import SGD
-from transformers.file_utils import requires_datasets
+import torchvision.models as models
+from lib.settings.config import settings
 from lib.utils import CleanData, TwitterData
+from pytorch_lightning.metrics import Accuracy
 from pytorch_lightning.metrics.functional import accuracy
 from pytorch_lightning.metrics.functional.classification import \
     confusion_matrix
-from pytorch_lightning.metrics import Accuracy
-from transformers import AdamW, BertModel, get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 from scikitplot.metrics import plot_confusion_matrix
-import matplotlib.pyplot as plt
-import torchvision.models as models
-from lib.settings.config import settings
+from torch.optim import Adam
+from torch.optim.lr_scheduler import StepLR
+from torch.optim.sgd import SGD
+from transformers import (AdamW, BertModel, get_cosine_schedule_with_warmup,
+                          get_linear_schedule_with_warmup)
+from transformers.file_utils import requires_datasets
+
 
 class BertMNLIFinetuner(pl.LightningModule):
     def __init__(self,
@@ -63,21 +66,29 @@ class BertMNLIFinetuner(pl.LightningModule):
         self.bert = BertModel.from_pretrained(
             self.pretrain_model_name, output_attentions=True)
 
+        self.tree_hidden_dim = 0
         if self.tree:
-            self.tree_hidden_dim = 100
-            self.lstm1_num_layers = 3
+            self.tree_layer = nn.Sequential(
+                            nn.Linear(self.feature_dim*self.max_tree_length,self.feature_dim*self.max_tree_length//2),
+                            nn.Tanh(),
+                            nn.Linear(self.feature_dim*self.max_tree_length//2,self.feature_dim*self.max_tree_length//4),
+                            nn.Tanh(),
+                        )
+            self.tree_hidden_dim = self.feature_dim*self.max_tree_length//4
+            self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
+
+            # self.tree_hidden_dim = 100
+            # self.lstm1_num_layers = 3
             
-            self.lstm1 = nn.LSTM(self.feature_dim, self.tree_hidden_dim,
-                        num_layers=self.lstm1_num_layers)
+            # self.tree_layer = nn.LSTM(self.feature_dim, self.tree_hidden_dim,
+            #             num_layers=self.lstm1_num_layers)
+            # self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
 
-        self.classifier = self.make_classifier(self.layer_num)
+        self.classifier = self.make_classifier(self.bert.config.hidden_size+self.tree_hidden_dim,self.layer_num)
 
-    def make_classifier(self, layer_num=1):
+    def make_classifier(self, hidden_size, layer_num=1):
         layers = []
-        if self.tree:
-            sz = self.bert.config.hidden_size + self.tree_hidden_dim
-        else:
-            sz = self.bert.config.hidden_size
+        sz = hidden_size
         for l in range(layer_num-1):
             layers += [nn.Linear(sz, sz//2)]
             layers += [nn.ReLU(True)]
@@ -113,18 +124,22 @@ class BertMNLIFinetuner(pl.LightningModule):
         # output of lstm (seq_len, batch, num_directions*hidden_size)
         cls_out = None
         if self.tree:
-            lstmout, (hn, cn) = self.lstm1(tree.view(-1,tree.size(0), self.feature_dim))
+            tree_out = self.tree_layer(tree)
 
+            #lstmout, (hn, cn) = self.tree_layer(tree.view(-1,tree.size(0), self.feature_dim))
             # get the last hidden state (batch, hidden_dim)
-            lstm_cls = hn[-1]
+            #tree_out = hn[-1]
             # concate bert and lstm output
-            cls_out = torch.cat((h_cls,lstm_cls),dim=1)
+            cls_out = torch.cat((h_cls,tree_out),dim=1)
+            logits_1 = self.classifier1(tree_out.view(tree_out.size(0),-1))
+            logits = self.classifier(cls_out.view(cls_out.size(0),-1))
+            return logits, logits_1
         else:
             cls_out = h_cls
 
-        logits = self.classifier(cls_out.view(cls_out.size(0),-1))
+            logits = self.classifier(cls_out.view(cls_out.size(0),-1))
         
-        return logits, attn
+            return logits
 
     def prepare_data(self) -> None:
         self.twdata.prepare_data()
@@ -134,14 +149,18 @@ class BertMNLIFinetuner(pl.LightningModule):
         if self.tree:
             input_ids, attention_mask, token_type_ids, tree, label = batch
             # fwd
-            y_hat, attn = self.forward(input_ids, attention_mask, token_type_ids,tree)
+            y_hat, logits_1 = self.forward(input_ids, attention_mask, token_type_ids,tree)
+            loss_1 = F.cross_entropy(y_hat, label)
+            loss_2 = F.cross_entropy(logits_1,label)
+            if phase == 'train':
+                loss = loss_2
+            else:
+                loss = loss_2
         else:
             input_ids, attention_mask, token_type_ids, label = batch
             # fwd
-            y_hat, attn = self.forward(input_ids, attention_mask, token_type_ids, None)
-        
-        # loss
-        loss = F.cross_entropy(y_hat, label)
+            y_hat = self.forward(input_ids, attention_mask, token_type_ids, None)
+            loss = F.cross_entropy(y_hat, label)
 
         # acc
         a, y_hat = torch.max(y_hat, dim=1)
@@ -200,8 +219,9 @@ class BertMNLIFinetuner(pl.LightningModule):
         if self.tree:
             optimizer1 = AdamW([
                         {'params': self.bert.parameters(), 'lr': 2e-5},
-                        {'params': self.classifier.parameters(), 'lr':1e-4},
-                        {'params': self.lstm1.parameters(), 'lr': 1e-4}
+                        {'params': self.classifier.parameters(), 'lr':1e-3},
+                        {'params': self.classifier1.parameters(), 'lr':1e-3},
+                        {'params': self.tree_layer.parameters(), 'lr': 1e-3}
                     ],
                 lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
         else:
@@ -224,7 +244,7 @@ class BertMNLIFinetuner(pl.LightningModule):
         optimizer1 = AdamW(model.parameters(), 
             lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
 
-        optimizer2 = AdamW(self.lstm1.parameters(), lr=self.hparams.learning_rate,
+        optimizer2 = AdamW(self.tree_layer.parameters(), lr=self.hparams.learning_rate,
             eps=self.hparams.adam_epsilon)
         
         optimizer3 = AdamW(self.classifier.parameters(), lr=self.hparams.learning_rate,

@@ -161,12 +161,8 @@ def combine_data(content, trees, labels):
 def read_content(path):
     pairs = {}
     with open(path, mode='r', encoding = 'utf-8') as f:
-
         for line in f:
-            
             id, text = line.split('\t')
-            
-            
             #modify/transform text
             text = text.lower()
             #break into set of words
@@ -182,24 +178,15 @@ def read_content(path):
                 if word not in stopwords.words('english') and word.isalpha():
                     word_Final = word_Lemmatized.lemmatize(word,tag_map[tag[0]])
                     Final_words.append(word_Final)
-            
-            Tfidf_vect = TfidfVectorizer()
-            Tfidf_vect.fit(Final_words)
-            text = Tfidf_vect.transform(Final_words)
-            #print(text)
-            #print(Final_words)
-            
-            ########
-            if id not in pairs.keys():
-                
-                
-                
-                pairs[int(id)] = text
-                #print(text)
-            else:
-                print('error')
-                
-    #print(pairs.values())
+            pairs[int(id)] = ' '.join(Final_words)
+    
+    Tfidf_vect = TfidfVectorizer()
+    X = Tfidf_vect.fit_transform(list(pairs.values())).toarray()
+    for i, k in enumerate(pairs.keys()):
+        pairs[k] = X[i]
+    print('pairs lenght ', len(pairs))
+    print('X shape', X.shape)
+    print(X)
     return pairs
 
 def read_label(path):
@@ -217,9 +204,9 @@ if __name__ == '__main__':
     
     #tree structure
     
-    r_label = read_label('rumor_detection_acl2017/twitter15/label.txt')
-    r_text = read_content('rumor_detection_acl2017/twitter15/source_tweets.txt')
-    tree_map = read_tree('rumor_detection_acl2017/twitter15/tree/')
+    r_label = read_label('../../rumor_detection_acl2017/twitter15/label.txt')
+    r_text = read_content('../../rumor_detection_acl2017/twitter15/source_tweets.txt')
+    tree_map = read_tree('../../rumor_detection_acl2017/twitter15/tree/')
     #print(tree_map.shape)
     encoded = encode_tree(tree_map, 500, padding = True)
     #print(encoded.shape)

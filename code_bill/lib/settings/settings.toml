@@ -5,10 +5,10 @@ data = '../../rumor_detection_acl2017'
 [transfer]
 dbname = 'status_db.json'
     [transfer.param]
-    layer_num = [1,2]
+    layer_num = [1]
     freeze_type = ['no']
     pretrain_model = ['bert-base-cased']
     #split_type = ['1516','tt','tvt','15_tvt','16_tvt']
     split_type = ['tvt']
-    tree = [true,false]
-    max_tree_len = [100,500]
+    tree = [true]
+    max_tree_len = [100,500,1000]
