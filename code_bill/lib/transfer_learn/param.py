@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from tinydb import TinyDB, Query
 from lib.settings.config import settings
 import itertools
 
@@ -8,12 +7,15 @@ __all__ = ['Param', 'ParamGenerator']
 
 @dataclass
 class Param():
+    exp: int
     layer_num: int
     freeze_type: str
     pretrain_model: str
     split_type: str
-    tree: bool
+    tree: str
     max_tree_len: int
+    limit: int
+    dnn: str
 
 class ParamGenerator():
     def __init__(self):
@@ -24,8 +26,18 @@ class ParamGenerator():
             self.l.append(list(p[k]))
 
     def gen(self):
+        flag_1 = True
         for i in itertools.product(*self.l):
             p = Param(*i)
-            if not p.tree:
-                p.max_tree_len = 0
+            
+            if p.tree == 'none':
+                if flag_1:
+                    p.dnn = 'none'
+                    p.max_tree_len = 0
+                    flag_1 = False
+                else:
+                    continue
+            elif p.tree == 'node2vec' and p.dnn == 'LSTM':
+                continue
+
             yield p

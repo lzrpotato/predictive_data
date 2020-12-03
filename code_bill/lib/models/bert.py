@@ -23,6 +23,8 @@ from transformers import (AdamW, BertModel, get_cosine_schedule_with_warmup,
                           get_linear_schedule_with_warmup)
 from transformers.file_utils import requires_datasets
 
+__all__ = ['BertMNLIFinetuner']
+
 
 class BertMNLIFinetuner(pl.LightningModule):
     def __init__(self,
@@ -35,7 +37,9 @@ class BertMNLIFinetuner(pl.LightningModule):
                  eval_batch_size=32,
                  layer_num=1,
                  tree=True,
-                 max_tree_length=500,
+                 max_tree_length=100,
+                 limit=100,
+                 dnn='CNN',
                  freeze_type='all',
                  split_type='tvt',
                  **kwargs
@@ -46,8 +50,10 @@ class BertMNLIFinetuner(pl.LightningModule):
         self.split_type = split_type
         self.tree = tree
         self.max_tree_length = max_tree_length
+        self.limit = limit
+        self.dnn = dnn
         self.twdata = TwitterData(
-            settings.data, self.pretrain_model_name,tree=self.tree,split_type=self.split_type,max_tree_length=self.max_tree_length)
+            settings.data, self.pretrain_model_name,tree=self.tree,split_type=self.split_type,max_tree_length=self.max_tree_length,limit=self.limit)
         
         self.freeze_type = freeze_type
         self.layer_num = layer_num
@@ -67,21 +73,44 @@ class BertMNLIFinetuner(pl.LightningModule):
             self.pretrain_model_name, output_attentions=True)
 
         self.tree_hidden_dim = 0
-        if self.tree:
-            self.tree_layer = nn.Sequential(
-                            nn.Linear(self.feature_dim*self.max_tree_length,self.feature_dim*self.max_tree_length//2),
-                            nn.Tanh(),
-                            nn.Linear(self.feature_dim*self.max_tree_length//2,self.feature_dim*self.max_tree_length//4),
-                            nn.Tanh(),
-                        )
-            self.tree_hidden_dim = self.feature_dim*self.max_tree_length//4
-            self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
+        tree_nn_type = self.dnn
+        if self.tree != 'none':
+            if tree_nn_type == 'MLP':
+                self.tree_layer = nn.Sequential(
+                                nn.BatchNorm1d(self.feature_dim*self.max_tree_length),
+                                nn.Linear(self.feature_dim*self.max_tree_length,self.feature_dim*self.max_tree_length//2),
+                                nn.ReLU(True),
+                                nn.BatchNorm1d(self.feature_dim*self.max_tree_length//2),
+                                nn.Linear(self.feature_dim*self.max_tree_length//2,self.feature_dim*self.max_tree_length//2),
+                                nn.ReLU(True),
+                                nn.BatchNorm1d(self.feature_dim*self.max_tree_length//2),
+                                nn.Linear(self.feature_dim*self.max_tree_length//2,self.feature_dim*self.max_tree_length//4),
+                                nn.ReLU(True),
+                                nn.Dropout(),
+                            )
+                self.tree_hidden_dim = self.feature_dim*self.max_tree_length//4
+            elif tree_nn_type == 'CNN':
+                self.tree_layer = nn.Sequential(
+                                nn.Unflatten(1, (1,self.feature_dim*self.max_tree_length)),                # b,1,self.feature_dim*self.max_tree_length
+                                nn.BatchNorm1d(1),                       
+                                nn.Conv1d(1,8,kernel_size=3,stride=2),  # b,8,self.feature_dim*self.max_tree_length//2
+                                nn.AvgPool1d(3,2),                      # b,8,self.feature_dim*self.max_tree_length//4
+                                nn.ReLU(True),
+                                nn.BatchNorm1d(8),
+                                nn.Conv1d(8,16,kernel_size=3,stride=2), # b,16,self.feature_dim*self.max_tree_length//8
+                                nn.ReLU(True),
+                                nn.Flatten(1,-1),
+                            )
+                self.tree_hidden_dim = (self.feature_dim*self.max_tree_length//8-1)*16
+            elif tree_nn_type == 'LSTM':
+                self.tree_hidden_dim = 100
+                self.lstm1_num_layers = 3
+                self.tree_layer = nn.Sequential(
+                                nn.Unflatten(1,(self.max_tree_length,self.feature_dim)),
+                                nn.LSTM(self.feature_dim, self.tree_hidden_dim,num_layers=self.lstm1_num_layers,batch_first=True),
+                            )
 
-            # self.tree_hidden_dim = 100
-            # self.lstm1_num_layers = 3
-            
-            # self.tree_layer = nn.LSTM(self.feature_dim, self.tree_hidden_dim,
-            #             num_layers=self.lstm1_num_layers)
+            self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
             # self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
 
         self.classifier = self.make_classifier(self.bert.config.hidden_size+self.tree_hidden_dim,self.layer_num)
@@ -123,12 +152,14 @@ class BertMNLIFinetuner(pl.LightningModule):
         # input of lstm (seq_len, batch, feature_dim)
         # output of lstm (seq_len, batch, num_directions*hidden_size)
         cls_out = None
-        if self.tree:
-            tree_out = self.tree_layer(tree)
-
-            #lstmout, (hn, cn) = self.tree_layer(tree.view(-1,tree.size(0), self.feature_dim))
-            # get the last hidden state (batch, hidden_dim)
-            #tree_out = hn[-1]
+        if self.tree != 'none':
+            if self.dnn == 'LSTM':
+                lstmout, (hn, cn) = self.tree_layer(tree)
+                # get the last hidden state (batch, hidden_dim)
+                tree_out = hn[-1]
+            else:
+                tree_out = self.tree_layer(tree)
+            
             # concate bert and lstm output
             cls_out = torch.cat((h_cls,tree_out),dim=1)
             logits_1 = self.classifier1(tree_out.view(tree_out.size(0),-1))
@@ -146,16 +177,16 @@ class BertMNLIFinetuner(pl.LightningModule):
 
     def shared_my_step(self, batch, batch_nb, phase):
         # batch
-        if self.tree:
+        if self.tree != 'none':
             input_ids, attention_mask, token_type_ids, tree, label = batch
             # fwd
             y_hat, logits_1 = self.forward(input_ids, attention_mask, token_type_ids,tree)
             loss_1 = F.cross_entropy(y_hat, label)
             loss_2 = F.cross_entropy(logits_1,label)
             if phase == 'train':
-                loss = loss_2
+                loss = loss_1 + 0.4*loss_2
             else:
-                loss = loss_2
+                loss = loss_1
         else:
             input_ids, attention_mask, token_type_ids, label = batch
             # fwd
@@ -216,7 +247,7 @@ class BertMNLIFinetuner(pl.LightningModule):
         self.epoch_end(outputs, phase)
 
     def configure_optimizers(self):
-        if self.tree:
+        if self.tree != 'none':
             optimizer1 = AdamW([
                         {'params': self.bert.parameters(), 'lr': 2e-5},
                         {'params': self.classifier.parameters(), 'lr':1e-3},

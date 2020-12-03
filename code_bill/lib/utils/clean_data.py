@@ -2,6 +2,9 @@ import operator
 from tqdm import tqdm
 import re
 
+__all__ = ['CleanData']
+
+
 class CleanData():
     def __init__(self):
         pass
