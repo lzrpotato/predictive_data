@@ -1,14 +1,16 @@
+from lib.utils import twitter_data
 import pandas as pd
-from gensim.models import KeyedVectors
-    
+import os
+from lib.utils import TwitterData, CleanData
+
 def test_tf():
-    os.environ["COMET_MODE"] = 'DISABLE'
     from lib.transfer_learn.transfer_factory import TransferFactory
     tf = TransferFactory()
     tf.run()
 
 def test():
-    from lib.utils import TwitterData, CleanData
+    from gensim.models import KeyedVectors
+
     dataset = TwitterData('../../rumor_detection_acl2017')
     cdf = CleanData()
     build_vab = cdf.build_vocab
@@ -53,6 +55,27 @@ def tokenizer_test():
         count += unc
     print(count)
 
+def test_twdata():
+    pretrain_tokenizer_model = 'bert-base-cased'
+    pretrain_model = 'bert-base-cased'
+    split_type = 'tvt'
+    tree = 'node2vec'
+    max_tree_len = [100,500]
+    limit = [100]
+
+    for l in limit:
+        for mtl in max_tree_len:
+            td = TwitterData(
+                '../../rumor_detection_acl2017',
+                pretrain_tokenizer_model,
+                tree=tree,
+                max_tree_length=mtl,
+                split_type='tvt',
+                limit=l,
+                )
+            td.setup()
+
 if __name__ == '__main__':
-    test_tf()
+    #test_tf()
+    test_twdata()
     #tokenizer_test()
