@@ -1,4 +1,5 @@
 import os
+from dataclasses import asdict
 
 import numpy as np
 import pytorch_lightning as pl
@@ -8,33 +9,65 @@ from lib.transfer_learn.param import Param, ParamGenerator
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import CometLogger
-from lib.utils import Status
+from tinydb import Query, TinyDB
 
 __all__ = ['TransferFactory']
+
+
+class Status():
+    def __init__(self):
+        self.dbpath = settings.checkpoint + settings.transfer.dbname
+        self.db = TinyDB(self.dbpath, sort_keys=True,indent='\t',separators=(',',': '))
+
+    def save_state(self, p, result):
+        metrics = ['train_acc_epoch','val_acc_epoch','test_acc_epoch']
+        nr = {}
+        for metric in metrics:
+            nr[metric] = float(result[metric])
+        
+        nr.update(asdict(p))
+        print(nr)
+        self.db.insert(nr)
+
+    def check_state(self, p: Param):
+        existed = True
+        pq = Query()
+        res = self.db.search(
+            (pq.layer_num==p.layer_num) \
+            & (pq.freeze_type == p.freeze_type) \
+            & (pq.pretrain_model == p.pretrain_model) \
+            & (pq.split_type == p.split_type) \
+            & (pq.tree == p.tree) \
+            & (pq.max_tree_len == p.max_tree_len)
+        )
+        
+        if res == []:
+            existed = False
+        
+        return existed
 
 
 class TransferFactory():
     def __init__(self):
         self.pg = ParamGenerator()
-        exp = int(list(settings.transfer.param.exp)[0])
-        self.status = Status(exp)
+        self.status = Status()
         
     def set_config(self, p: Param):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         pl.seed_everything(1234)
 
         es_cb = EarlyStopping(
-            monitor='val_acc_epoch',
+            monitor='val_loss_epoch',
             patience=15,
-            mode='max',
+            mode='min',
         )
         
         ckp_cb = ModelCheckpoint(
-            monitor='val_acc_epoch',
+            monitor='val_loss_epoch',
             dirpath=settings.checkpoint,
-            filename='bert-best-model-{epoch:02d}-{val_acc_epoch:.2f}',
+            filename='bert-best-model-{epoch:02d}-{train_loss:.2f}',
             save_top_k=1,
-            mode='max'
+            mode='min'
         )
         self.ckp_cb = ckp_cb
         
@@ -42,7 +75,7 @@ class TransferFactory():
             api_key='RHywDLGIc61n40dBpkSqcmqp7',
             project_name='fakenews',  # Optional
             workspace='lzrpotato',
-            experiment_name=f'{p.split_type}-{p.tree}-{p.max_tree_len}-{p.exp}',  # Optional
+            experiment_name=f'{p.split_type}-{p.tree}-{p.max_tree_len}-{p.layer_num}',  # Optional
             offline=False,
         )
 
@@ -74,8 +107,6 @@ class TransferFactory():
                     max_tree_length=p.max_tree_len,
                     freeze_type=p.freeze_type,
                     split_type=p.split_type,
-                    limit=p.limit,
-                    dnn=p.dnn
                 )
                 model.setup('fit')
                 

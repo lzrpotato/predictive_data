@@ -1,13 +1,13 @@
 import seaborn as sns
 import matplotlib.pyplot as plt
+from tinydb import TinyDB
 import pandas as pd
-from lib.transfer_learn.param import Param, ParamGenerator
-from lib.utils.Status import Status
+from lib.settings.config import settings
+from lib.transfer_learn.param import Param
 
 class Visual():
     def __init__(self):
-        self.status = Status()
-        self.pg = ParamGenerator()
+        pass
 
     def _draw_basic(self, df, key, filename):
         sns.set_style('whitegrid')
@@ -20,18 +20,30 @@ class Visual():
         print(filename)
 
     def draw_transfer(self):
-        results = []
-        p: Param
-        for p in self.pg.gen():
+        db = TinyDB(settings.checkpoint+settings.transfer.dbname)
+        keys = [
+            "freeze_type",
+			"layer_num",
+			"pretrain_model",
+			"split_type",
+            "tree",
+            "max_tree_len",
+			"train_acc_epoch",
+            "val_acc_epoch",
+            "test_acc_epoch"
+        ]
+        data = [[i[k] for k in keys] for i in db.all()]
+        data = pd.DataFrame(data, columns=keys)
 
-            _, test_result = self.status.read_best_results(p)
-            p.tree
-            results.append([p.dnn,p.max_tree_len,p.tree,test_result])
-
-        data = pd.DataFrame(results, columns=['dnn','maxlen','tree','test'])
-        #data = data.sort_values(by=['tree','maxlen','dnn'])
-        print(data)
-        #for tree
-        #for dnn, dnn_rst in data.groupby('dnn'):
-        #    for 
-
+        for pm, pm_r in data.groupby('pretrain_model'):
+            for st, st_r in pm_r.groupby('split_type'):
+                newdf = st_r.pivot(index='layer_num',columns='freeze_type',values=['train_acc_epoch','val_acc_epoch','test_acc_epoch'])
+                key = 'test_acc_epoch'
+                filename = settings.fig+f'{pm}_{st}_lf_{key}.png'
+                self._draw_basic(newdf, key, filename)
+                
+                newdf = st_r.pivot(index='freeze_type',columns='layer_num',values=['train_acc_epoch','val_acc_epoch','test_acc_epoch'])
+                key = 'test_acc_epoch'
+                filename = settings.fig+f'{pm}_{st}_fl_{key}.png'
+                self._draw_basic(newdf, key, filename)
+                

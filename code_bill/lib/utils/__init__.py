@@ -1,3 +1,2 @@
-from .twitter_data import *
-from .clean_data import *
-from .Status import *
+from .twitter_data import TwitterData
+from .clean_data import CleanData

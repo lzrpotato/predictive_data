@@ -241,7 +241,7 @@ if __name__ == '__main__':
     #print(d.shape)
     
     #svm
-    SVM = svm.SVC(C=1.0, kernel='rbf')
+    SVM = svm.SVC(C=1.0, kernel='linear', degree=3, gamma='auto')
     SVM.fit(Train_X,Train_Y)
     predictions_SVM = SVM.predict(Test_X)
     print("SVM Accuracy Score -> ",accuracy_score(predictions_SVM, Test_Y)*100)
