@@ -13,7 +13,6 @@ from lib.settings.config import settings
 from tqdm import tqdm
 import pickle
 import networkx as nx
-import lib.models.node2vec as node2vec
 from gensim.models import Word2Vec, KeyedVectors
 from nodevectors import Node2Vec
 from gensim.models.callbacks import CallbackAny2Vec
