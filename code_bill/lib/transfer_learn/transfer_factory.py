@@ -25,7 +25,7 @@ class TransferFactory():
 
         es_cb = EarlyStopping(
             monitor='val_acc_epoch',
-            patience=15,
+            patience=7,
             mode='max',
         )
         

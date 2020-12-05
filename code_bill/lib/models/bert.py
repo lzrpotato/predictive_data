@@ -258,7 +258,7 @@ class BertMNLIFinetuner(pl.LightningModule):
         else:
             optimizer1 = AdamW([
                         {'params': self.bert.parameters(), 'lr': 2e-5},
-                        {'params': self.classifier.parameters(), 'lr':1e-4},
+                        {'params': self.classifier.parameters(), 'lr':1e-3},
                     ],
                 lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
         scheduler_cosine = get_linear_schedule_with_warmup(optimizer1
