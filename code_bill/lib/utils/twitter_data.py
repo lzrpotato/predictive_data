@@ -1,10 +1,13 @@
+from copy import Error
 from typing import List, Union, Mapping
 import os
 from dataclasses import dataclass
 
+from sklearn.model_selection import StratifiedKFold
 import numpy as np
 import torch
 from sklearn.model_selection import train_test_split
+from torch._C import ErrorReport
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from anytree import Node, RenderTree, PreOrderIter, LevelOrderIter
@@ -18,7 +21,6 @@ from nodevectors import Node2Vec
 from gensim.models.callbacks import CallbackAny2Vec
 
 __all__ = ['TwitterData']
-
 
 
 @dataclass
@@ -68,6 +70,8 @@ class TwitterData():
         test_batch_size=32,
         limit=100,
         split_type='tvt',
+        cv=False,
+        n_splits=5,
         **kwargs
     ):
         super().__init__()
@@ -84,38 +88,97 @@ class TwitterData():
         self.limit = limit
         self.n_class = 4
         self.split_type = split_type
-        if self.split_type not in ['1516','tv','tvt','15_tvt','16_tvt']:
-            print('warning: split_type invalid!')
-            self.split_type = '641620'
+        self.cv = cv
+        self.n_splits = n_splits
         self.feature_dim = 1
         self.setup_flag = True
         self.skip_id = ['523123779124600833']
-
-    def setup(self):
-        if not self.setup_flag:
-            return
-
-        self.setup_flag = False
-        print('***** setup dataset *****')
-        self.train, self.val, self.test = None, None, None
-        self._load_data()
-        self._data_split(self.split_type)
-        self._to_tensor()
-        self._set_dataloader()
-        print('***** finish *****')
-
+        
     def prepare_data(self):
         AutoTokenizer.from_pretrained(
             self.pretrain_tokenizer_model, use_fast=True)
 
-    def _to_tensor(self):
-        self.dataset = {'train': self.train, 'val': self.val, 'test': self.test}
-        for split in self.dataset.keys():
-            d = self.dataset[split]
+    def setup(self):
+        if self.cv:
+            self.setup_kfold()
+        else:
+            if not self.setup_flag:
+                return
+
+            self.setup_flag = False
+            print('***** setup dataset *****')
+            tw15_X, tw15_y, tw16_X, tw16_y = self._load_data()
+            train, val, test = self._data_split(self.split_type, tw15_X, tw15_y, tw16_X, tw16_y)
+            self._set_dataloader(train, val, test)
+            print('***** finish *****')
+            print('class to index', self.class_to_index)
+
+    def setup_kfold(self):
+        if not self.cv:
+            print('TwitterData, please set parameter cv == True to use kfold')
+            raise Error
+        print('***** setup kfold dataset *****')
+        self.train, self.val, self.test = None, None, None
+        tw15_X, tw15_y, tw16_X, tw16_y = self._load_data()
+        X, y = self._build_kfold_data(self.split_type, tw15_X, tw15_y, tw16_X, tw16_y)
+        self._X, self._y = X, y
+        self.kf = StratifiedKFold(n_splits=self.n_splits,shuffle=True)
+        print('***** finish *****')
+        print('class to index', self.class_to_index)
+
+    def kfold_gen(self):
+        if self._X is None:
+            print('Please Call setup_kfold() first')
+            raise UnboundLocalError
+
+        for i, data in enumerate(self._next_fold(self._X, self._y)):
+            train, val, test = data
+            self._set_dataloader(train, val, test)
+            print(f'kfold {i+1}/{self.n_splits}')
+            
+            if self.split_type.split('_')[1] == 'tvt':
+                split_sum = len(self._train_data) + len(self._val_data) + len(self._test_data)
+                tr_ = int(len(self._train_data)/split_sum*100)
+                va_ = int(len(self._val_data)/split_sum*100)
+                te_ = int(len(self._test_data)/split_sum*100)
+                print(f'train_val_test split ratio {tr_}:{va_}:{te_}')
+            elif self.split_type.split('_')[1] == 'tv':
+                split_sum = len(self._train_data) + len(self._test_data)
+                tr_ = int(len(self._train_data)/split_sum*100)
+                te_ = int(len(self._test_data)/split_sum*100)
+                print(f'train_test split ratio {tr_}:{te_}')
+            yield i
+
+    def _next_fold(self, X, y):
+        for train_index, test_index in self.kf.split(X, y):
+            X_train, X_test = X[train_index], X[test_index]
+            y_train, y_test = y[train_index], y[test_index]
+            
+            if self.split_type.split('_')[1] == 'tvt':
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_train, y_train, train_size=0.8, random_state=1, shuffle=True, stratify=y_train)
+                
+                train = [[data, label] for data, label in zip(X_train, y_train)]
+                val = [[data, label] for data, label in zip(X_val, y_val)]
+                test = [[data, label] for data, label in zip(X_test, y_test)]
+                yield train,val,test
+
+            elif self.split_type.split('_')[1] == 'tv':
+                train = [[data, label] for data, label in zip(X_train, y_train)]
+                val = [[data, label] for data, label in zip(X_test, y_test)]
+                test = [[data, label] for data, label in zip(X_test, y_test)]
+            
+                yield train,val,test
+
+    def _to_tensor(self, train, val, test):
+        dataset = {'train': train, 'val': val, 'test': test}
+        for split in dataset.keys():
+            d = dataset[split]
             if d is None:
                 continue
             
-            self.dataset[split] = self._convert_to_features(d)
+            dataset[split] = self._convert_to_features(d)
+        return dataset
 
     def _convert_to_features(self, example, indices=None):
         source = []
@@ -164,13 +227,14 @@ class TwitterData():
                 trees, mean, std = self._encode_tree(tree_map,self.max_tree_length,padding=True)
             data[t] = self._combine_data(self._read_text(source_p), trees, self._read_label(label_p))
 
-        self.tw15_X, self.tw15_y = data[tw[0]]
-        self.tw16_X, self.tw16_y = data[tw[1]]
+        tw15_X, tw15_y = data[tw[0]]
+        tw16_X, tw16_y = data[tw[1]]
 
-        self._find_class(self.tw15_y, self.tw16_y)
+        self._find_class(tw15_y, tw16_y)
 
-        self.tw15_y = self._class_to_index(self.tw15_y)
-        self.tw16_y = self._class_to_index(self.tw16_y)
+        tw15_y = self._class_to_index(tw15_y)
+        tw16_y = self._class_to_index(tw16_y)
+        return tw15_X, tw15_y, tw16_X, tw16_y
 
     def _find_class(self, label1, label2):
         label = np.concatenate((label1, label2))
@@ -185,69 +249,58 @@ class TwitterData():
         index = np.vectorize(self.class_to_index.__getitem__)(label)
         return index
 
-    def _data_split(self, split_type):
-        if split_type == '1516':
-            self.train = [[data, label]
-                          for data, label in zip(self.tw15_X, self.tw15_y)]
-            self.test = [[data, label]
-                         for data, label in zip(self.tw16_X, self.tw16_y)]
-        if split_type == 'tt':
-            X = np.concatenate((self.tw15_X, self.tw16_X))
-            y = np.concatenate((self.tw15_y, self.tw16_y))
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=1, stratify=self.self.classes)
-
-            self.train = [[data, label]
-                          for data, label in zip(X_train, y_train)]
-            self.test = [[data, label] for data, label in zip(X_test, y_test)]
-        if split_type == 'tvt':
-            X = np.concatenate((self.tw15_X, self.tw16_X))
-            y = np.concatenate((self.tw15_y, self.tw16_y))
-
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, train_size=0.8, random_state=1, shuffle=True, stratify=y)
-
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_train, y_train, train_size=0.8, random_state=1, shuffle=True, stratify=y_train)
-
-            
-            self.train = [[data, label] for data, label in zip(X_train, y_train)]
-            self.val = [[data, label] for data, label in zip(X_val, y_val)]
-            self.test = [[data, label] for data, label in zip(X_test, y_test)]
-        if split_type == '15_tvt':
-            X_train, X_test, y_train, y_test = train_test_split(
-                self.tw15_X, self.tw15_y, train_size=0.8, random_state=1, shuffle=True, stratify= self.tw15_y)
-
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_train, y_train, train_size=0.8, random_state=1, shuffle=True, stratify=y_train)
-
-            self.train = [[data, label] for data, label in zip(X_train, y_train)]
-            self.val = [[data, label] for data, label in zip(X_val, y_val)]
-            self.test = [[data, label] for data, label in zip(X_test, y_test)]
-
-        if split_type == '16_tvt':
-            X_train, X_test, y_train, y_test = train_test_split(
-                self.tw16_X, self.tw16_y, train_size=0.8, random_state=1, shuffle=True, stratify=self.tw16_y)
-
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_train, y_train, train_size=0.8, random_state=1, shuffle=True, stratify=y_train)
-
-            self.train = [[data, label] for data, label in zip(X_train, y_train)]
-            self.val = [[data, label] for data, label in zip(X_val, y_val)]
-            self.test = [[data, label] for data, label in zip(X_test, y_test)]
-
-    def _set_dataloader(self, shuffle=True):
+    def _build_kfold_data(self, split_type, tw15_X, tw15_y, tw16_X, tw16_y):
+        X, y = None, None
         
-        self._train_data = DataLoader(self.dataset['train'],
+        if split_type.split('_')[0] == 'all':
+            X = np.concatenate((tw15_X, tw16_X))
+            y = np.concatenate((tw15_y, tw16_y))
+            
+        if split_type.split('_')[0] == '15':
+            X, y = tw15_X, tw15_y
+
+        if split_type.split('_')[0] == '16':
+            X, y = tw16_X, tw16_y
+        
+        return X, y
+
+    def _data_split(self, split_type, tw15_X, tw15_y, tw16_X, tw16_y):
+        if split_type.split('_')[0] == 'all':
+            X = np.concatenate((tw15_X, tw16_X))
+            y = np.concatenate((tw15_y, tw16_y))
+
+        if split_type.split('_')[0] == '15':
+            X = tw15_X
+            y = tw15_y
+
+        if split_type.split('_')[0] == '16':
+            X = tw16_X
+            y = tw16_y
+        
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, train_size=0.8, random_state=1, shuffle=True, stratify=y)
+
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train, y_train, train_size=0.8, random_state=1, shuffle=True, stratify=y_train)
+
+        train = [[data, label] for data, label in zip(X_train, y_train)]
+        val = [[data, label] for data, label in zip(X_val, y_val)]
+        test = [[data, label] for data, label in zip(X_test, y_test)]
+
+        return train, val, test
+
+    def _set_dataloader(self, train, val, test, shuffle=True):
+        dataset = self._to_tensor(train, val, test)
+        self._train_data = DataLoader(dataset['train'],
                                       batch_size=self.train_batch_size,
                                       shuffle=shuffle,
                                       num_workers=4)
-        self._test_data = DataLoader(self.dataset['test'],
+        self._test_data = DataLoader(dataset['test'],
                                      batch_size=self.test_batch_size,
                                      shuffle=False,
                                      num_workers=4)
-        if self.dataset['val'] is not None:
-            self._val_data = DataLoader(self.dataset['val'],
+        if dataset['val'] is not None:
+            self._val_data = DataLoader(dataset['val'],
                                         batch_size=self.val_batch_size,
                                         shuffle=False,
                                         num_workers=4)
@@ -257,12 +310,12 @@ class TwitterData():
         return self._train_data
 
     @property
-    def test_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
-        return self._test_data
-
-    @property
     def val_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
         return self._val_data
+
+    @property
+    def test_dataloader(self) -> Union[DataLoader, List[DataLoader]]:
+        return self._test_data
 
     def _combine_text_label(self, texts, labels):
         text_label = []

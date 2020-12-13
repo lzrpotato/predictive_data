@@ -1,14 +1,15 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from lib.settings.config import settings
 import itertools
 
 __all__ = ['Param', 'ParamGenerator']
 
 
-@dataclass
+@dataclass(eq=True, frozen=True)
 class Param():
     exp: int
-    layer_num: int
+    classifier: str
+    reduction: str
     freeze_type: str
     pretrain_model: str
     split_type: str
@@ -16,6 +17,12 @@ class Param():
     max_tree_len: int
     limit: int
     dnn: str
+    auxiliary: bool
+
+    @property
+    def experiment_name(self):
+        ret = f'exp={self.exp}-cf={self.classifier}-rd={self.reduction}-st={self.split_type}-t={self.tree}-m={self.max_tree_len}-d={self.dnn}-a={self.auxiliary}'
+        return ret
 
 class ParamGenerator():
     def __init__(self):
@@ -26,18 +33,23 @@ class ParamGenerator():
             self.l.append(list(p[k]))
 
     def gen(self):
-        flag_1 = True
+        status_record = set()
         for i in itertools.product(*self.l):
-            p = Param(*i)
+            dp = asdict(Param(*i))
             
-            if p.tree == 'none':
-                if flag_1:
-                    p.dnn = 'none'
-                    p.max_tree_len = 0
-                    flag_1 = False
-                else:
-                    continue
-            elif p.tree == 'node2vec' and p.dnn == 'LSTM':
-                continue
+            if dp['tree'] == 'none':
 
+                dp['dnn'] = 'none'
+                dp['auxiliary'] = False
+                dp['max_tree_len'] = 0
+
+            elif dp['tree'] == 'node2vec' and dp['dnn'] == 'LSTM':
+                continue
+            
+            p = Param(**dp)
+            if p in status_record:
+                continue
+            else:
+                status_record.add(p)
+            
             yield p
