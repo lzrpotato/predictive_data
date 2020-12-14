@@ -4,6 +4,7 @@ import pandas as pd
 from lib.transfer_learn.param import Param, ParamGenerator
 from lib.utils.Status import Status
 import os
+import numpy as np
 
 class Visual():
     def __init__(self):
@@ -66,28 +67,47 @@ class Visual():
 
     def draw_svm_rf(self):
         cv_avg = pd.read_csv(f'./results/pca_{0.98}_cv_avg.csv',index_col=0)
+        cv_avg.columns = ['data','tree_dnn','SVM','RF']
         p: Param
         results = []
         for p in self.pg.gen():
             if not self.status.read_key(p,'ok'):
                 continue
             counts, test_result = self.status.read_kfold(p)
-            print(counts,test_result)
             results.append([p.split_type,
                             f'{p.max_tree_len}_{p.dnn}',
                             test_result['val_acc_epoch'],
                             ])
-        cv_dense = pd.DataFrame(results, columns=['data','tree_dnn','dense_test'])
+        cv_dense = pd.DataFrame(results, columns=['data','tree_dnn','Dense'])
         cv_all = pd.merge(cv_dense,cv_avg,on=['data','tree_dnn'])
         #print(cv_all)
         #print(cv_avg)
         for data, data_res in cv_all.groupby('data'):
-            melted = pd.melt(data_res[['tree_dnn','dense_test','svm_test','rf_test']],id_vars='tree_dnn',var_name='classifier',value_name='accuracy')
+            melted = pd.melt(data_res[['tree_dnn','Dense','SVM','RF']],id_vars='tree_dnn',var_name='Classifier',value_name='Accuracy')
+            
             melted = melted.sort_values(['tree_dnn'],ascending=True)
-            print(melted)
-            fig, ax = plt.subplots(figsize=(7,6))
-            sns.barplot(x='tree_dnn',y='accuracy',hue='classifier',data=melted,ax=ax)
+            #print(melted['tree_dnn'].str.split('_')[1] == 'LSTM')
+            #print(melted[melted['tree_dnn'].str.contains('none|CNN')])
+            #melted = melted[melted['tree_dnn'].str.contains('none|CNN')]
+            fig, ax = plt.subplots(figsize=(12,6))
+            g = sns.barplot(x='tree_dnn',y='Accuracy',hue='Classifier',data=melted,ax=ax)
             ax.set_ylim(0.5,0.9)
+            ax.set_xlabel('max length of tree & add-on model')
+            ax.set_title('Accuracy against max length of tree and add-on model')
+            def show_values_on_bars(axs):
+                def _show_on_single_plot(ax):        
+                    for p in ax.patches:
+                        _x = p.get_x() + p.get_width() / 2
+                        _y = p.get_y() + p.get_height()
+                        value = '{:.2f}'.format(p.get_height())
+                        ax.text(_x, _y, value, ha="center") 
+
+                if isinstance(axs, np.ndarray):
+                    for idx, ax in np.ndenumerate(axs):
+                        _show_on_single_plot(ax)
+                else:
+                    _show_on_single_plot(axs)
+            show_values_on_bars(ax)
             fn = f'barcatplot_all_{data}.png'
             path = os.path.join('./figure',fn)
             print(f'save {path}')
