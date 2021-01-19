@@ -1,6 +1,7 @@
 from copy import Error
-from typing import List, Union, Mapping
+from typing import List, Tuple, Union, Mapping
 import os
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 from dataclasses import dataclass
 
 from sklearn.model_selection import StratifiedKFold
@@ -72,6 +73,9 @@ class TwitterData():
         split_type='tvt',
         cv=False,
         n_splits=5,
+        datatype='dataloader',
+        subclass=False,
+        textformat='token',
         **kwargs
     ):
         super().__init__()
@@ -92,11 +96,19 @@ class TwitterData():
         self.n_splits = n_splits
         self.feature_dim = 1
         self.setup_flag = True
+        self.subclass=subclass
+        self.textformat = textformat
+        if datatype not in ['dataloader','numpy']:
+            raise Error('datatype is either "dataloader" or "numpy"')
+        self.datatype = datatype
         self.skip_id = ['523123779124600833']
         
     def prepare_data(self):
         AutoTokenizer.from_pretrained(
             self.pretrain_tokenizer_model, use_fast=True)
+
+    def summary(self):
+        self.setup(self)
 
     def setup(self):
         if self.cv:
@@ -133,27 +145,16 @@ class TwitterData():
 
         for i, data in enumerate(self._next_fold(self._X, self._y)):
             train, val, test = data
-            self._set_dataloader(train, val, test)
+            self._set_data(train, val, test)
+
             print(f'kfold {i+1}/{self.n_splits}')
-            
-            if self.split_type.split('_')[1] == 'tvt':
-                split_sum = len(self._train_data) + len(self._val_data) + len(self._test_data)
-                tr_ = int(len(self._train_data)/split_sum*100)
-                va_ = int(len(self._val_data)/split_sum*100)
-                te_ = int(len(self._test_data)/split_sum*100)
-                print(f'train_val_test split ratio {tr_}:{va_}:{te_}')
-            elif self.split_type.split('_')[1] == 'tv':
-                split_sum = len(self._train_data) + len(self._test_data)
-                tr_ = int(len(self._train_data)/split_sum*100)
-                te_ = int(len(self._test_data)/split_sum*100)
-                print(f'train_test split ratio {tr_}:{te_}')
             yield i
 
     def _next_fold(self, X, y):
         for train_index, test_index in self.kf.split(X, y):
             X_train, X_test = X[train_index], X[test_index]
             y_train, y_test = y[train_index], y[test_index]
-            
+
             if self.split_type.split('_')[1] == 'tvt':
                 X_train, X_val, y_train, y_val = train_test_split(
                     X_train, y_train, train_size=0.8, random_state=1, shuffle=True, stratify=y_train)
@@ -161,26 +162,38 @@ class TwitterData():
                 train = [[data, label] for data, label in zip(X_train, y_train)]
                 val = [[data, label] for data, label in zip(X_val, y_val)]
                 test = [[data, label] for data, label in zip(X_test, y_test)]
+                
+                split_sum = len(train) + len(val) + len(test)
+                tr_ = int(len(train)/split_sum*100)
+                va_ = int(len(val)/split_sum*100)
+                te_ = int(len(test)/split_sum*100)
+                print(f'train_val_test split ratio {tr_}:{va_}:{te_}')
+
                 yield train,val,test
 
             elif self.split_type.split('_')[1] == 'tv':
                 train = [[data, label] for data, label in zip(X_train, y_train)]
                 val = [[data, label] for data, label in zip(X_test, y_test)]
                 test = [[data, label] for data, label in zip(X_test, y_test)]
-            
+
+                split_sum = len(train) + len(test)
+                tr_ = int(len(train)/split_sum*100)
+                te_ = int(len(test)/split_sum*100)
+                print(f'train_test split ratio {tr_}:{te_}')
+
                 yield train,val,test
 
-    def _to_tensor(self, train, val, test):
+    def _convert_to_features_all(self, train, val, test, datatype):
         dataset = {'train': train, 'val': val, 'test': test}
         for split in dataset.keys():
             d = dataset[split]
             if d is None:
                 continue
             
-            dataset[split] = self._convert_to_features(d)
+            dataset[split] = self._convert_to_features(d, datatype)
         return dataset
 
-    def _convert_to_features(self, example, indices=None):
+    def _convert_to_features(self, example, datatype, indices=None):
         source = []
         tree = []
         label = []
@@ -192,22 +205,56 @@ class TwitterData():
         features = self.tokenizer.batch_encode_plus(
             list(source),
             max_length=self.max_seq_length,
-            padding=True,
+            padding='max_length',
             truncation=True,
         )
 
         features_ = []
-        if self.tree == 'node2vec' or self.tree == 'tree':
-            for i in range(len(label)):
-                features_.append((torch.tensor(features['input_ids'][i]), torch.tensor(features['token_type_ids'][i]),
-                                torch.tensor(features['attention_mask'][i]), torch.tensor(tree[i],dtype=torch.float32), torch.tensor(label[i])))
-        elif self.tree == 'none':
-            for i in range(len(label)):
-                features_.append((torch.tensor(features['input_ids'][i]), torch.tensor(features['token_type_ids'][i]),
-                                torch.tensor(features['attention_mask'][i]), torch.tensor(label[i])))
-        
-        return features_
-
+        if datatype == 'dataloader':
+            print('self.pretrain_tokenizer_model ',self.pretrain_tokenizer_model)
+            if self.pretrain_tokenizer_model.split('-')[0] == 'bert':
+                if self.tree == 'node2vec' or self.tree == 'tree':
+                    for i in range(len(label)):
+                        features_.append((torch.tensor(features['input_ids'][i]), torch.tensor(features['token_type_ids'][i]),
+                                        torch.tensor(features['attention_mask'][i]), torch.tensor(tree[i],dtype=torch.float32), torch.tensor(label[i])))
+                elif self.tree == 'none':
+                    for i in range(len(label)):
+                        features_.append((torch.tensor(features['input_ids'][i]),  torch.tensor(features['token_type_ids'][i]),
+                                        torch.tensor(features['attention_mask'][i]), torch.tensor(label[i])))
+            elif self.pretrain_tokenizer_model.split('-')[0] == 'roberta':
+                if self.tree == 'node2vec' or self.tree == 'tree':
+                    for i in range(len(label)):
+                        features_.append((torch.tensor(features['input_ids'][i]),torch.tensor(features['attention_mask'][i]),
+                                        torch.tensor(tree[i],dtype=torch.float32), torch.tensor(label[i])))
+                elif self.tree == 'none':
+                    for i in range(len(label)):
+                        features_.append((torch.tensor(features['input_ids'][i]), torch.tensor(features['attention_mask'][i]), 
+                                        torch.tensor(label[i])))
+            else:
+                raise ValueError(f'pretrain_tokenizer_model {self.pretrain_tokenizer_model} is incorrect')
+            
+            return features_
+        elif datatype == 'numpy':
+            citt = self.tokenizer.convert_ids_to_tokens
+            
+            if self.textformat == 'raw':
+                if self.tree == 'node2vec' or self.tree == 'tree':
+                    for i in range(len(label)):
+                        features_.append((np.array(source[i]), np.array(tree[i]), np.array(label[i])))
+                elif self.tree == 'none':
+                    for i in range(len(label)):
+                        features_.append((np.array(source[i]), np.array(label[i])))
+            elif self.textformat == 'token':
+                if self.tree == 'node2vec' or self.tree == 'tree':
+                    for i in range(len(label)):
+                        features_.append((np.array(' '.join(citt(features['input_ids'][i]))), np.array(tree[i]), np.array(label[i])))
+                elif self.tree == 'none':
+                    for i in range(len(label)):
+                        features_.append((np.array(' '.join(citt(features['input_ids'][i]))), np.array(label[i])))
+            else:
+                raise Error('textformat should be "raw" or "token"')
+            return features_
+    
     def _load_data(self):
         tw = ['twitter15','twitter16']
         data, trees = {}, {}
@@ -232,6 +279,10 @@ class TwitterData():
 
         self._find_class(tw15_y, tw16_y)
 
+        if self.subclass:
+            tw15_X,tw15_y = self._class_filter(tw15_X,tw15_y)
+            tw16_X,tw16_y = self._class_filter(tw16_X,tw16_y)
+
         tw15_y = self._class_to_index(tw15_y)
         tw16_y = self._class_to_index(tw16_y)
         return tw15_X, tw15_y, tw16_X, tw16_y
@@ -241,6 +292,7 @@ class TwitterData():
         classes = sorted(np.unique(label))
         self.class_to_index = {classname: i for i,
                                classname in enumerate(classes)}
+        print('class_to_index',self.class_to_index)
         self.class_names = classes
         self.n_class = len(classes)
         self.classes = [i for i in range(len(self.class_names))]
@@ -249,22 +301,34 @@ class TwitterData():
         index = np.vectorize(self.class_to_index.__getitem__)(label)
         return index
 
+    def _class_filter(self, X, y):
+        index = np.where((y == 'false') | (y=='true'),True,False)
+        X_ = X[index]
+        y_ = y[index]
+        return X_, y_
+
     def _build_kfold_data(self, split_type, tw15_X, tw15_y, tw16_X, tw16_y):
         X, y = None, None
-        
+        if len(split_type.split('_')) != 2:
+            raise Error('split_type should be in "15_tv" or "16_tvt"')
+
         if split_type.split('_')[0] == 'all':
             X = np.concatenate((tw15_X, tw16_X))
             y = np.concatenate((tw15_y, tw16_y))
             
-        if split_type.split('_')[0] == '15':
+        elif split_type.split('_')[0] == '15':
             X, y = tw15_X, tw15_y
 
-        if split_type.split('_')[0] == '16':
+        elif split_type.split('_')[0] == '16':
             X, y = tw16_X, tw16_y
+        
+        else:
+            raise Error(f'split_type is {split_type}, split_type should be in "15_tv" or "16_tvt"')
         
         return X, y
 
     def _data_split(self, split_type, tw15_X, tw15_y, tw16_X, tw16_y):
+        X, y = None, None
         if split_type.split('_')[0] == 'all':
             X = np.concatenate((tw15_X, tw16_X))
             y = np.concatenate((tw15_y, tw16_y))
@@ -289,8 +353,49 @@ class TwitterData():
 
         return train, val, test
 
+    def _set_data(self, train, val, test):
+        if self.datatype == 'dataloader':
+            self._set_dataloader(train, val, test)
+        elif self.datatype == 'numpy':
+            self._set_numpy_data(train, val, test)
+
+    def _set_numpy_data(self, train, val, test):
+        dataset = self._convert_to_features_all(train, val, test, self.datatype)
+        #dataset = {'train':train,'val':val,'test':test}
+        self.np_dataset = {}
+        for k, data in dataset.items():
+            x, t, y = [], [], []
+            if self.tree == 'none':
+                for xi, yi in data:
+                    x.append(xi)
+                    y.append(yi)
+                x = np.array(x)
+                y = np.array(y)
+                self.np_dataset[k] = (x,None,y)
+            elif self.tree == 'tree':
+                for xi, ti, yi in data:
+                    x.append(xi)
+                    t.append(ti)
+                    y.append(yi)
+                x = np.array(x)
+                t = np.array(t)
+                y = np.array(y)
+                self.np_dataset[k] = (x,t,y)
+
+    @property
+    def train_data(self):
+        return self.np_dataset['train']
+
+    @property
+    def val_data(self):
+        return self.np_dataset['val']
+
+    @property
+    def test_data(self):
+        return self.np_dataset['test']
+
     def _set_dataloader(self, train, val, test, shuffle=True):
-        dataset = self._to_tensor(train, val, test)
+        dataset = self._convert_to_features_all(train, val, test, self.datatype)
         self._train_data = DataLoader(dataset['train'],
                                       batch_size=self.train_batch_size,
                                       shuffle=shuffle,
@@ -337,7 +442,7 @@ class TwitterData():
             tree = trees[id]
             data.append([text, tree, label])
 
-        data = np.array(data)
+        data = np.array(data,dtype=object)
         data = self._normalize_data(data)
         
         return data[:, 0:2], data[:,2]

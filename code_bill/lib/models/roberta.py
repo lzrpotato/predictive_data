@@ -18,13 +18,13 @@ from sklearn.metrics import precision_recall_fscore_support as score
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 from torch.optim.sgd import SGD
-from transformers import (AdamW, BertModel, get_cosine_schedule_with_warmup,
+from transformers import (AdamW, RobertaModel, get_cosine_schedule_with_warmup,
                           get_linear_schedule_with_warmup)
 
 __all__ = ['BertMNLIFinetuner']
 
 
-class BertMNLIFinetuner(pl.LightningModule):
+class RoBERTaFinetuner(pl.LightningModule):
     def __init__(self,
                  ep: Param,
                  fold=None,
@@ -36,11 +36,11 @@ class BertMNLIFinetuner(pl.LightningModule):
                  eval_batch_size=32,
                  **kwargs
                  ):
-        super(BertMNLIFinetuner, self).__init__()
+        super(RoBERTaFinetuner, self).__init__()
         self.save_hyperparameters()
         self.fold = fold
         self.ep = ep
-        self.pretrain_model_name = ep.pretrain_model
+        self.pretrain_model_name = 'roberta-base'
         self.split_type = ep.split_type
         self.tree = ep.tree
         self.max_tree_length = ep.max_tree_len
@@ -49,7 +49,7 @@ class BertMNLIFinetuner(pl.LightningModule):
         self.auxiliary = ep.auxiliary
         
         self.twdata = TwitterData(
-            settings.data, ep.pretrain_model,tree=ep.tree,split_type=ep.split_type,max_tree_length=ep.max_tree_len,limit=ep.limit)
+            settings.data, self.pretrain_model_name,tree=ep.tree,split_type=ep.split_type,max_tree_length=ep.max_tree_len,limit=ep.limit)
         
         self.freeze_type = ep.freeze_type
         self.classifier_type = ep.classifier
@@ -57,8 +57,6 @@ class BertMNLIFinetuner(pl.LightningModule):
             self.layer_num = int(self.classifier_type.split('_')[1])
         elif self.classifier_type.split('_')[0] in ['svm','rf']:
             self.layer_num = 1
-        else:
-            raise ValueError(f'classifier_type {self.classifier_type} is incorrect!')
         self.reduction = ep.reduction
         self.feature_dim = self.twdata.feature_dim
         self.num_classes = self.twdata.n_class
@@ -72,7 +70,7 @@ class BertMNLIFinetuner(pl.LightningModule):
     
     def _create_model(self):
         # use pretrained BERT
-        self.bert = BertModel.from_pretrained(
+        self.bert = RobertaModel.from_pretrained(
             self.pretrain_model_name, output_attentions=True)
 
         self.tree_hidden_dim = 0
@@ -104,7 +102,6 @@ class BertMNLIFinetuner(pl.LightningModule):
                                 nn.ReLU(True),
                                 nn.Flatten(1,-1),
                             )
-
                 self.tree_hidden_dim = (self.feature_dim*self.max_tree_length//8-1)*16
             elif tree_nn_type == 'LSTM':
                 self.tree_hidden_dim = 100
@@ -122,6 +119,7 @@ class BertMNLIFinetuner(pl.LightningModule):
     def make_classifier(self, hidden_size, layer_num=1):
         layers = []
         sz = hidden_size
+        #layers += [nn.BatchNorm1d(sz)]
         for l in range(layer_num-1):
             layers += [nn.Linear(sz, sz//2)]
             layers += [nn.ReLU(True)]
@@ -147,10 +145,9 @@ class BertMNLIFinetuner(pl.LightningModule):
                     param.requires_grad = True
                 count += 1
 
-    def forward(self, input_ids, attention_mask, token_type_ids, tree, phase):
+    def forward(self, input_ids, attention_mask, tree, phase):
         return_dict = self.bert(input_ids=input_ids,
                                attention_mask=attention_mask,
-                               token_type_ids=token_type_ids,
                                return_dict=True)
         h = return_dict['last_hidden_state']
         h_cls = h[:, 0]
@@ -183,15 +180,15 @@ class BertMNLIFinetuner(pl.LightningModule):
 
     def prepare_data(self) -> None:
         print('prepare_data called')
-        self.twdata.prepare_data()
-        self.twdata.setup()
+        #self.twdata.prepare_data()
+        #self.twdata.setup()
 
     def shared_my_step(self, batch, batch_nb, phase):
         # batch
         if self.tree != 'none':
-            input_ids, attention_mask, token_type_ids, tree, label = batch
+            input_ids, attention_mask, tree, label = batch
             # fwd
-            y_hat, logits_1 = self.forward(input_ids, attention_mask, token_type_ids,tree, phase)
+            y_hat, logits_1 = self.forward(input_ids, attention_mask,tree, phase)
             loss_1 = F.cross_entropy(y_hat, label)
             loss_2 = F.cross_entropy(logits_1,label)
             if phase == 'train' and self.auxiliary:
@@ -201,9 +198,9 @@ class BertMNLIFinetuner(pl.LightningModule):
                 loss = loss_1
                 
         else:
-            input_ids, attention_mask, token_type_ids, label = batch
+            input_ids, attention_mask, label = batch
             # fwd
-            y_hat = self.forward(input_ids, attention_mask, token_type_ids, None, phase)
+            y_hat = self.forward(input_ids, attention_mask, None, phase)
             loss = F.cross_entropy(y_hat, label)
 
         # acc
@@ -248,6 +245,7 @@ class BertMNLIFinetuner(pl.LightningModule):
     def validation_epoch_end(self, outputs: List[Any]) -> None:
         phase = 'val'
         self.log(f'{phase}_acc_epoch', self.val_acc.compute())
+        print(f'\nval_acc_epoch {self.val_acc.compute()}')
         self.epoch_end(outputs, phase)
 
     def test_step(self, batch, batch_nb, dataloader_idx=-1):
@@ -261,15 +259,15 @@ class BertMNLIFinetuner(pl.LightningModule):
 
         if self.classifier_type.split('_')[0] == 'dense':
             if self.tree != 'none':
-                input_ids, attention_mask, token_type_ids, tree, label = batch
+                input_ids, attention_mask, tree, label = batch
                 # fwd
-                y_hat, logits_1 = self.forward(input_ids, attention_mask, token_type_ids,tree,phase)
+                y_hat, logits_1 = self.forward(input_ids, attention_mask,tree,phase)
                 loss = F.cross_entropy(y_hat, label)
                 
             else:
-                input_ids, attention_mask, token_type_ids, label = batch
+                input_ids, attention_mask, label = batch
                 # fwd
-                y_hat = self.forward(input_ids, attention_mask, token_type_ids, None,phase)
+                y_hat = self.forward(input_ids, attention_mask, None,phase)
                 loss = F.cross_entropy(y_hat, label)
              # acc
             a, y_hat = torch.max(y_hat, dim=1)
@@ -280,12 +278,12 @@ class BertMNLIFinetuner(pl.LightningModule):
             return {'loss': loss, f'{phase}_label': label, f'{phase}_pred': y_hat}
         else:
             if self.tree != 'none':
-                input_ids, attention_mask, token_type_ids, tree, label = batch
-                y_fea_map, y_fea_map_tree = self.forward(input_ids, attention_mask, token_type_ids,tree, phase)
+                input_ids, attention_mask, tree, label = batch
+                y_fea_map, y_fea_map_tree = self.forward(input_ids, attention_mask,tree, phase)
             else:
-                input_ids, attention_mask, token_type_ids, label = batch
+                input_ids, attention_mask, label = batch
                 # fwd
-                y_fea_map = self.forward(input_ids, attention_mask, token_type_ids, None, phase)
+                y_fea_map = self.forward(input_ids, attention_mask, None, phase)
             return {'fea_map':y_fea_map, 'labels': label}
 
     def test_epoch_end(self, outputs: List[Any]) -> None:

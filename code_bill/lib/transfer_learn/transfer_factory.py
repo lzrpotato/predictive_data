@@ -3,6 +3,7 @@ import os
 import numpy as np
 import pytorch_lightning as pl
 from lib.models.bert import BertMNLIFinetuner
+from lib.models.roberta import RoBERTaFinetuner
 from lib.settings.config import settings
 from lib.transfer_learn.param import Param, ParamGenerator
 from lib.utils import Status
@@ -28,21 +29,25 @@ class TransferFactory():
     def set_config(self, p: Param):
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         pl.seed_everything(1234)
-        monitor_key = 'loss'
+        monitor_key = 'acc'
+
         if monitor_key == 'loss':
             monitor_mode = 'min'
-        else:
+        elif monitor_key == 'acc':
             monitor_mode = 'max'
+        else:
+            raise ValueError(f'monitor_key "{monitor_key}" is incorrect')
+        
         es_cb = EarlyStopping(
             monitor=f'val_{monitor_key}_epoch',
             patience=7,
             mode=monitor_mode,
         )
-        
+        model_name = p.pretrain_model.split('-')[0]
         ckp_cb = ModelCheckpoint(
             monitor=f'val_{monitor_key}_epoch',
             dirpath=settings.checkpoint,
-            filename='bert-best-model-{epoch:02d}-{val_acc_epoch:.2f}',
+            filename=model_name+'-best-model-{epoch:02d}-{val_acc_epoch:.3f}',
             save_top_k=1,
             mode=monitor_mode
         )
@@ -84,9 +89,10 @@ class TransferFactory():
                 for fold in twdata.kfold_gen():
                     self.set_config(p)
                     model = BertMNLIFinetuner(ep=p,fold=fold)
+                    #model = RoBERTaFinetuner(ep=p,fold=fold)
                     if p.classifier.split('_')[0] == 'dense':
                         self.trainer.fit(model,train_dataloader=twdata.train_dataloader,val_dataloaders=twdata.val_dataloader)
-                        test_result = self.trainer.test(model,test_dataloaders=twdata.test_dataloader)
+                        test_result = self.trainer.test(test_dataloaders=twdata.test_dataloader)
                     elif p.classifier.split('_')[0] in ['svm','rf']:
                         if not os.path.isfile(f'./features/feamap_test_fd={fold}_{p.experiment_name}.npz'):
                             self.trainer.fit(model,train_dataloader=twdata.train_dataloader,val_dataloaders=twdata.val_dataloader)
@@ -175,8 +181,8 @@ class TransferFactory():
                 from sklearn.svm import SVC
                 twdata = TwitterData(settings.data, p.pretrain_model,tree=p.tree,split_type=p.split_type,max_tree_length=p.max_tree_len)
                 twdata.setup()
-                train_x = np.array([tree.numpy() for _,_,_,tree,_ in twdata.dataset['train']])
-                val_x = np.array([tree.numpy() for _,_,_,tree,_ in twdata.dataset['val']])
+                train_x = np.array([np.concatenate((source.numpy(),tree.numpy()),axis=1) for source,_,_,tree,_ in twdata.dataset['train']])
+                val_x = np.array([np.concatenate((source.numpy(),tree.numpy()),axis=1) for source,_,_,tree,_ in twdata.dataset['val']])
                 train_y = np.array([label.numpy() for _,_,_,_,label in twdata.dataset['train']])
                 val_y = np.array([label.numpy() for _,_,_,_,label in twdata.dataset['val']])
                 
