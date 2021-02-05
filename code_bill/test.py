@@ -1,7 +1,5 @@
-from lib.utils import twitter_data
 import pandas as pd
 import os
-from lib.utils import TwitterData, CleanData
 
 def test_tf():
     from lib.transfer_learn.transfer_factory import TransferFactory
@@ -56,26 +54,40 @@ def tokenizer_test():
     print(count)
 
 def test_twdata():
+    from lib.utils.twitter_data import TwitterData
     pretrain_tokenizer_model = 'bert-base-cased'
     pretrain_model = 'bert-base-cased'
-    split_type = 'tvt'
+    split_type = '15_tv'
     tree = 'node2vec'
     max_tree_len = [100,500]
     limit = [100]
 
     for l in limit:
         for mtl in max_tree_len:
-            td = TwitterData(
-                '../../rumor_detection_acl2017',
-                pretrain_tokenizer_model,
-                tree=tree,
-                max_tree_length=mtl,
-                split_type='tvt',
-                limit=l,
-                )
+            td = TwitterData(tree='tree',max_tree_length=100,datatype='all',split_type=split_type, cv=True)
             td.setup()
+            next(td.kfold_gen())
+            print(td.train_data[1].shape)
+
+def test_kfold_deterministic():
+    from lib.utils.twitter_data import TwitterData
+    td = TwitterData(tree='tree',max_tree_length=100,datatype='all',split_type='15_tv', cv=True, kfold_deterministic=True)
+    td.setup()
+    td.kfold_get_by_fold(1)
+    print(td.train_data[1].shape)
+
+def test_summary():
+    from lib.utils.data_summary import Statistics
+    ss = Statistics()
+    ss.Show_Statistics()
+
+def test_slurm_var():
+    print('SLURM_JOB_ID ',os.environ.get('SLURM_JOB_ID'))
+    print('SLURM_JOB_NAME ',os.environ.get('SLURM_JOB_NAME'))
+    print('SLURM_SUBMIT_DIR ',os.environ.get('SLURM_SUBMIT_DIR'))
+    print('SLURM_JOB_NODELIST ',os.environ.get('SLURM_JOB_NODELIST'))
 
 if __name__ == '__main__':
     #test_tf()
-    test_twdata()
+    test_slurm_var()
     #tokenizer_test()
