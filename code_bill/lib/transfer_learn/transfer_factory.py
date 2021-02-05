@@ -40,7 +40,7 @@ class TransferFactory():
         
         es_cb = EarlyStopping(
             monitor=f'val_{monitor_key}_epoch',
-            patience=7,
+            patience=14,
             mode=monitor_mode,
         )
         model_name = p.pretrain_model.split('-')[0]

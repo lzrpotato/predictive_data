@@ -2,6 +2,7 @@ from copy import Error
 from typing import List, Tuple, Union, Mapping
 import os
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ['COMET_DISABLE_AUTO_LOGGING'] = '1'
 from dataclasses import dataclass
 
 from sklearn.model_selection import StratifiedKFold
@@ -20,6 +21,7 @@ import networkx as nx
 from gensim.models import Word2Vec, KeyedVectors
 from nodevectors import Node2Vec
 from gensim.models.callbacks import CallbackAny2Vec
+import pandas as pd
 
 __all__ = ['TwitterData']
 
@@ -41,7 +43,7 @@ class MyNode():
         self.t = float(t)
 
     def __repr__(self):
-        return str(self.sid) + '_' + str(self.t)
+        return str(self.t)
 
 
 class EpochLogger(CallbackAny2Vec):
@@ -76,6 +78,8 @@ class TwitterData():
         datatype='dataloader',
         subclass=False,
         textformat='token',
+        kfold_deterministic=False,
+        verbose=True,
         **kwargs
     ):
         super().__init__()
@@ -98,8 +102,9 @@ class TwitterData():
         self.setup_flag = True
         self.subclass=subclass
         self.textformat = textformat
-        if datatype not in ['dataloader','numpy']:
-            raise Error('datatype is either "dataloader" or "numpy"')
+        self.kfold_deterministic = kfold_deterministic
+        if datatype not in ['dataloader','numpy','all']:
+            raise Error('datatype is either "dataloader" or "all"')
         self.datatype = datatype
         self.skip_id = ['523123779124600833']
         
@@ -121,7 +126,7 @@ class TwitterData():
             print('***** setup dataset *****')
             tw15_X, tw15_y, tw16_X, tw16_y = self._load_data()
             train, val, test = self._data_split(self.split_type, tw15_X, tw15_y, tw16_X, tw16_y)
-            self._set_dataloader(train, val, test)
+            self._set_data(train, val, test)
             print('***** finish *****')
             print('class to index', self.class_to_index)
 
@@ -134,11 +139,42 @@ class TwitterData():
         tw15_X, tw15_y, tw16_X, tw16_y = self._load_data()
         X, y = self._build_kfold_data(self.split_type, tw15_X, tw15_y, tw16_X, tw16_y)
         self._X, self._y = X, y
-        self.kf = StratifiedKFold(n_splits=self.n_splits,shuffle=True)
+
+        if self.kfold_deterministic:
+            print('setup kfold deterministic')
+            self.kfolds = self.kfold_index_build(X, y)
+        else:
+            print('setup kfold dynamic')
+            self.kf = StratifiedKFold(n_splits=self.n_splits,shuffle=True)
         print('***** finish *****')
         print('class to index', self.class_to_index)
 
+    def kfold_get_by_fold(self, fold):
+        if self.kfolds is None:
+            raise UnboundLocalError('Please set kfold deterministic to True')
+
+        df_fold = self.kfolds[fold]
+        
+        train_index = df_fold[df_fold['train_type']==0]['index'].to_numpy()
+        val_index = df_fold[df_fold['train_type']==1]['index'].to_numpy()
+        test_index = df_fold[df_fold['train_type']==2]['index'].to_numpy()
+
+        if val_index.shape[0] == 0:
+            val_index = test_index
+        
+        X_train, X_val, X_test = self.X[train_index], self.X[val_index], self.X[test_index]
+        y_train, y_val, y_test = self.y[train_index], self.y[val_index], self.y[test_index]
+        train = [[data, label] for data, label in zip(X_train, y_train)]
+        val = [[data, label] for data, label in zip(X_val, y_val)]
+        test = [[data, label] for data, label in zip(X_test, y_test)]
+        
+        self._set_data(train, val, test)
+
+
     def kfold_gen(self):
+        if self.kf is None:
+            raise UnboundLocalError('When kfold deterministic is true, please call kfold_get_by_fold')
+
         if self._X is None:
             print('Please Call setup_kfold() first')
             raise UnboundLocalError
@@ -149,6 +185,45 @@ class TwitterData():
 
             print(f'kfold {i+1}/{self.n_splits}')
             yield i
+
+    def kfold_index_build(self, X, y):
+        if not os.path.isdir('./kfold/'):
+            os.mkdir('./kfold/')
+        
+        print('kfold_index_build')
+        self.X = X
+        self.y = y
+
+        fold_generated = True
+        kfolds = {}
+        for fold in range(5):
+            if not os.path.isfile(f'./kfold/{self.split_type}_fold_{fold}.csv'):
+                fold_generated = False
+                break
+        
+            df_fold = pd.read_csv(f'./kfold/{self.split_type}_fold_{fold}.csv')
+            kfolds[fold] = df_fold
+        
+        if fold_generated:
+            return kfolds
+        
+        # label train : 0, val: 1, test: 2
+        fold = 0
+        kfolds = {}
+        kf = StratifiedKFold(n_splits=self.n_splits)
+        for train_index, test_index in kf.split(X, y):
+            train_idx = [(i, 0) for i in train_index]
+            test_idx = [(i, 2) for i in test_index]
+            df_train = pd.DataFrame(train_idx, columns=['index','train_type'])
+            df_test = pd.DataFrame(test_idx, columns=['index','train_type'])
+            df_fold = pd.concat((df_train, df_test),axis=0, ignore_index=True)
+            df_fold.to_csv(f'./kfold/{self.split_type}_fold_{fold}.csv',index=False)
+            
+            kfolds[fold] = df_fold
+
+            fold += 1
+        
+        return kfolds
 
     def _next_fold(self, X, y):
         for train_index, test_index in self.kf.split(X, y):
@@ -272,8 +347,10 @@ class TwitterData():
             else:
                 tree_map = self._read_tree(t, tree_p)
                 trees, mean, std = self._encode_tree(tree_map,self.max_tree_length,padding=True)
+            
             data[t] = self._combine_data(self._read_text(source_p), trees, self._read_label(label_p))
 
+        
         tw15_X, tw15_y = data[tw[0]]
         tw16_X, tw16_y = data[tw[1]]
 
@@ -358,9 +435,14 @@ class TwitterData():
             self._set_dataloader(train, val, test)
         elif self.datatype == 'numpy':
             self._set_numpy_data(train, val, test)
+        elif self.datatype == 'all':
+            self._set_dataloader(train, val, test)
+            self._set_numpy_data(train, val, test)
+        else:
+            raise ValueError(f'DataType is incorrect {self.datatype}')
 
     def _set_numpy_data(self, train, val, test):
-        dataset = self._convert_to_features_all(train, val, test, self.datatype)
+        dataset = self._convert_to_features_all(train, val, test, 'numpy')
         #dataset = {'train':train,'val':val,'test':test}
         self.np_dataset = {}
         for k, data in dataset.items():
@@ -395,20 +477,20 @@ class TwitterData():
         return self.np_dataset['test']
 
     def _set_dataloader(self, train, val, test, shuffle=True):
-        dataset = self._convert_to_features_all(train, val, test, self.datatype)
+        dataset = self._convert_to_features_all(train, val, test, 'dataloader')
         self._train_data = DataLoader(dataset['train'],
                                       batch_size=self.train_batch_size,
                                       shuffle=shuffle,
-                                      num_workers=4)
+                                      num_workers=8)
         self._test_data = DataLoader(dataset['test'],
                                      batch_size=self.test_batch_size,
                                      shuffle=False,
-                                     num_workers=4)
+                                     num_workers=8)
         if dataset['val'] is not None:
             self._val_data = DataLoader(dataset['val'],
                                         batch_size=self.val_batch_size,
                                         shuffle=False,
-                                        num_workers=4)
+                                        num_workers=8)
 
     @property
     def train_dataloader(self) -> DataLoader:
@@ -514,47 +596,89 @@ class TwitterData():
         
         return root
 
-    def _encode_tree(self, tree_map: Mapping[str, Node], max_length=500, padding=False, deduct_first=False):
+    def TimeOrderIter(self, root: Node):
+        def sortkey(node):
+            return node.name.t
+        allnodes = list(root.descendants)
+        allnodes.sort(key=sortkey)
+
+        for node in allnodes:
+            yield node
+
+    def _encode_tree(self, tree_map: Mapping[str, Node], max_length=500, padding=False, deduct_first=False, random_choice=False):
         encoded_trees = {}
+        self.feature_dim = 6
         for index in sorted(tree_map.keys()):
+            if max_length == 0:
+                encoded_trees[index] = []
+                continue
             root = tree_map[index]
+            total_e = len(root.descendants)
+            total_h = root.height
+            #print(len(root.descendants), root.is_root, len(root.leaves), total_h)
             root_t = root.name.t
             encoding = []
 
-            for i, node in enumerate(LevelOrderIter(root)):
+            for i, node in enumerate(self.TimeOrderIter(root)):
+            #for i, node in enumerate(LevelOrderIter(root)):
                 if max_length != -1 and i >= max_length:
                     break
                 
                 if node.name.t-root_t < 0:
                    continue
-                encoding.append(node.name.t-root_t)
-                
+
+                element_node = (node.name.t-root_t,
+                                len(node.children)/total_e, 
+                                node.depth/total_h,
+                                len(node.siblings)/total_e, 
+                                float(node.is_leaf), 
+                                float(node.is_root))
+                encoding.append(element_node)
+            
+            encoding = np.array(encoding)
             if deduct_first:
                 encoding = encoding - encoding[1]
                 encoding[0] = 0.0
             
-            en_log = np.log10(np.array(encoding)+1)
-
-            encoding = en_log
+            en_log = np.log10(encoding[:,0]+1)
+            encoding[:,0] = en_log
+            
             if padding:
                 len_e = len(encoding)
-                if max_length - len_e > 0:
-                   encoding = np.pad(encoding, (0, max_length-len_e))
-            
+                
+                diff =  max_length - len_e
+                if diff > 0:
+                    if not random_choice:
+                        encoding = np.pad(encoding, [(0, diff),(0, 0)])
+                        #encoding = np.pad(encoding, (0, diff))
+                    else:
+                        rows = range(encoding.shape[0])
+                        indexs = np.random.choice(rows, diff, replace=True)
+                        rds = encoding[indexs,:]
+                        encoding = np.concatenate((encoding, rds))
+
+            #print(encoding.shape)
+            encoding = encoding.T
+            #print(encoding.shape)
             encoded_trees[index] = encoding
         
+        if max_length == 0:
+            return encoded_trees, 0, 0
+        
         avg = []
+        
         for k, v in encoded_trees.items():
-            avg.append(np.average(v))
+            avg.append(np.average(v[0,:]))
         
         my_mean = np.average(avg)
         my_std = np.std(avg)
 
         avg = []
         for k in encoded_trees.keys():
-            encoded_trees[k] = (encoded_trees[k] - my_mean)
-            avg.append(np.average(encoded_trees[k]))
+            encoded_trees[k][0,:] = (encoded_trees[k][0,:] - my_mean)
+            avg.append(np.average(encoded_trees[k][0,:]))
         
+    
         '''
         print('my_mean ', my_mean, ' my_std', my_std)
         import matplotlib.pyplot as plt

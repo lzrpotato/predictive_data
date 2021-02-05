@@ -20,6 +20,10 @@ from torch.optim.lr_scheduler import StepLR
 from torch.optim.sgd import SGD
 from transformers import (AdamW, RobertaModel, get_cosine_schedule_with_warmup,
                           get_linear_schedule_with_warmup)
+from lib.models.pt_cnn import PTCNN, CNN, CNN_, CNNOri, CNN_AVG, CNN_TKF
+
+import logging
+logger = logging.getLogger('pytorch_lightning.roberta')
 
 __all__ = ['BertMNLIFinetuner']
 
@@ -28,6 +32,8 @@ class RoBERTaFinetuner(pl.LightningModule):
     def __init__(self,
                  ep: Param,
                  fold=None,
+                 feature_dim=None,
+                 max_epoch=50,
                  learning_rate=2e-5,
                  adam_epsilon=1e-8,
                  warmup_steps=0,
@@ -40,13 +46,16 @@ class RoBERTaFinetuner(pl.LightningModule):
         self.save_hyperparameters()
         self.fold = fold
         self.ep = ep
-        self.pretrain_model_name = 'roberta-base'
+        if ep.pretrain_model.split('-')[0] != 'roberta':
+            raise ValueError(f'[Error] pretrain model name is wrong {ep.pretrain_model}')
+        self.pretrain_model_name = ep.pretrain_model
         self.split_type = ep.split_type
         self.tree = ep.tree
         self.max_tree_length = ep.max_tree_len
         self.limit = ep.limit
         self.dnn = ep.dnn
         self.auxiliary = ep.auxiliary
+        self.max_epoch = max_epoch
         
         self.twdata = TwitterData(
             settings.data, self.pretrain_model_name,tree=ep.tree,split_type=ep.split_type,max_tree_length=ep.max_tree_len,limit=ep.limit)
@@ -58,7 +67,10 @@ class RoBERTaFinetuner(pl.LightningModule):
         elif self.classifier_type.split('_')[0] in ['svm','rf']:
             self.layer_num = 1
         self.reduction = ep.reduction
-        self.feature_dim = self.twdata.feature_dim
+        if feature_dim:
+            self.feature_dim = feature_dim
+        else:
+            self.feature_dim = self.twdata.featue_dim
         self.num_classes = self.twdata.n_class
 
         self._create_model()
@@ -70,7 +82,7 @@ class RoBERTaFinetuner(pl.LightningModule):
     
     def _create_model(self):
         # use pretrained BERT
-        self.bert = RobertaModel.from_pretrained(
+        self.roberta = RobertaModel.from_pretrained(
             self.pretrain_model_name, output_attentions=True)
 
         self.tree_hidden_dim = 0
@@ -103,6 +115,48 @@ class RoBERTaFinetuner(pl.LightningModule):
                                 nn.Flatten(1,-1),
                             )
                 self.tree_hidden_dim = (self.feature_dim*self.max_tree_length//8-1)*16
+            
+            elif tree_nn_type == 'CNN_test':
+                self.tree_layer = nn.Sequential(
+                                nn.Unflatten(1, (1,self.feature_dim*self.max_tree_length)),                # b,1,self.feature_dim*self.max_tree_length
+                                nn.BatchNorm1d(1),                       
+                                nn.Conv1d(1,8,kernel_size=3,stride=2),  # b,8,self.feature_dim*self.max_tree_length//2
+                                nn.AvgPool1d(3,2),                      # b,8,self.feature_dim*self.max_tree_length//4
+                                nn.BatchNorm1d(8),
+                                nn.ReLU(True),
+                                nn.Conv1d(8,16,kernel_size=3,stride=2), # b,16,self.feature_dim*self.max_tree_length//8
+                                nn.BatchNorm1d(16),
+                                nn.ReLU(True),
+                                nn.Flatten(1,-1),
+                            )
+
+                self.tree_hidden_dim = (self.feature_dim*self.max_tree_length//8-1)*16
+            elif tree_nn_type == 'CNN_test2':
+                self.tree_layer = CNN(self.feature_dim, self.max_tree_length)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type == 'CNN_test3':
+                self.tree_layer = CNN_(self.feature_dim, self.max_tree_length)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type == 'CNNOri':
+                self.tree_layer = CNNOri(self.feature_dim,self.max_tree_length,fst_p=16)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNAVG':
+                fst_p = int(tree_nn_type.split('_')[1])
+                self.tree_layer = CNN_AVG(self.feature_dim,self.max_tree_length,fst_p=fst_p)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNRes':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = PTCNN(self.feature_dim,self.max_tree_length,fst_p=fst_c,blocks=2,pool='adaptive')
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNTKF':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = CNN_TKF(self.feature_dim,self.max_tree_length,fst_p=fst_c,dropout=False)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'PTCNN':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = PTCNN(self.feature_dim, self.max_tree_length, fst_c)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            
             elif tree_nn_type == 'LSTM':
                 self.tree_hidden_dim = 100
                 self.lstm1_num_layers = 3
@@ -114,7 +168,7 @@ class RoBERTaFinetuner(pl.LightningModule):
             self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
             # self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
 
-        self.classifier = self.make_classifier(self.bert.config.hidden_size+self.tree_hidden_dim,self.layer_num)
+        self.classifier = self.make_classifier(self.roberta.config.hidden_size+self.tree_hidden_dim,self.layer_num)
 
     def make_classifier(self, hidden_size, layer_num=1):
         layers = []
@@ -126,27 +180,28 @@ class RoBERTaFinetuner(pl.LightningModule):
             layers += [nn.Dropout()]
             sz //= 2
         
+        #layers += [nn.Dropout(0.2)]
         layers += [nn.Linear(sz, self.num_classes)]
         return nn.Sequential(*layers)
 
     def freeze_layer(self, freeze_type):
         if freeze_type == 'all':
-            for param in self.bert.parameters():
+            for param in self.roberta.parameters():
                 param.requires_grad = False
         elif freeze_type == 'no':
-            for param in self.bert.parameters():
+            for param in self.roberta.parameters():
                 param.requires_grad = True
         elif freeze_type == 'half':
-            n = sum([1 for i in self.bert.parameters()])
+            n = sum([1 for i in self.roberta.parameters()])
             count = 0 
-            for param in self.bert.parameters():
+            for param in self.roberta.parameters():
                 param.requires_grad = False
                 if count > n//2:
                     param.requires_grad = True
                 count += 1
 
     def forward(self, input_ids, attention_mask, tree, phase):
-        return_dict = self.bert(input_ids=input_ids,
+        return_dict = self.roberta(input_ids=input_ids,
                                attention_mask=attention_mask,
                                return_dict=True)
         h = return_dict['last_hidden_state']
@@ -179,7 +234,7 @@ class RoBERTaFinetuner(pl.LightningModule):
             return logits
 
     def prepare_data(self) -> None:
-        print('prepare_data called')
+        logger.debug('prepare_data called')
         #self.twdata.prepare_data()
         #self.twdata.setup()
 
@@ -306,7 +361,7 @@ class RoBERTaFinetuner(pl.LightningModule):
                     path = os.path.join('./features/',fn)
                     with open(path, 'wb') as f:
                         np.save(f, n_dataset)
-                        print(f'save fea_map to {path}')
+                        logger.info(f'save fea_map to {path}')
             else:
                 fea_map = torch.cat([x['fea_map'] for x in outputs]).cpu().detach().numpy()
                 labels = torch.cat([x['labels'] for x in outputs]).cpu().detach().numpy()
@@ -316,25 +371,25 @@ class RoBERTaFinetuner(pl.LightningModule):
                 path = os.path.join('./features/',fn)
                 with open(path, 'wb') as f:
                     np.save(f, n_dataset)
-                    print(f'save fea_map to {path}')
+                    logger.info(f'save fea_map to {path}')
 
     def configure_optimizers(self):
         if self.tree != 'none':
             optimizer1 = AdamW([
-                        {'params': self.bert.parameters(), 'lr': 2e-5},
-                        {'params': self.classifier.parameters(), 'lr':1e-3},
-                        {'params': self.classifier1.parameters(), 'lr':1e-3},
-                        {'params': self.tree_layer.parameters(), 'lr': 1e-3}
+                        {'params': self.roberta.parameters(), 'lr': 2e-5},
+                        {'params': self.classifier.parameters(), 'lr':1e-3,'weight_decay':1e-2},
+                        {'params': self.classifier1.parameters(), 'lr':1e-3,'weight_decay':1e-2},
+                        {'params': self.tree_layer.parameters(), 'lr': 1e-3,'weight_decay':1e-2}
                     ],
-                lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
+                eps=self.hparams.adam_epsilon)
         else:
             optimizer1 = AdamW([
-                        {'params': self.bert.parameters(), 'lr': 2e-5},
-                        {'params': self.classifier.parameters(), 'lr':1e-3},
+                        {'params': self.roberta.parameters(), 'lr': 2e-5},
+                        {'params': self.classifier.parameters(), 'lr':1e-3,'weight_decay':1e-2},
                     ],
                 lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
         scheduler_cosine = get_linear_schedule_with_warmup(optimizer1
-                ,num_warmup_steps=4,num_training_steps=50)
+                ,num_warmup_steps=self.max_epoch//10, num_training_steps=self.max_epoch)
         #scheduler1 = StepLR(optimizer=optimizer1, step_size=7, gamma=0.1)
         scheduler = {
             'scheduler': scheduler_cosine,
@@ -343,7 +398,7 @@ class RoBERTaFinetuner(pl.LightningModule):
         return [optimizer1], [scheduler]
 
     def _configure_optimizers(self):
-        model = self.bert
+        model = self.roberta
         optimizer1 = AdamW(model.parameters(), 
             lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
 
@@ -376,7 +431,7 @@ class RoBERTaFinetuner(pl.LightningModule):
         return optimizers, schedulers
 
     def setup(self, stage):
-        print('setup called')
+        logger.debug('setup called')
         pass
 
     def train_dataloader(self):

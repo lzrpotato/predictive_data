@@ -12,14 +12,19 @@ import torch.nn.functional as F
 from lib.settings.config import settings
 from lib.transfer_learn.param import Param
 from lib.utils.twitter_data import TwitterData
+from lib.models.pt_cnn import PTCNN,FCN,CNN,CNN_,CNNOri,CNN_AVG,CNN_FIX,CNN_DEP,CNN_OK,CNN_TK,CNN_TKF
 from pytorch_lightning.metrics import Accuracy
 from scikitplot.metrics import plot_confusion_matrix
 from sklearn.metrics import precision_recall_fscore_support as score
 from torch.optim import Adam
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from torch.optim.sgd import SGD
 from transformers import (AdamW, BertModel, get_cosine_schedule_with_warmup,
                           get_linear_schedule_with_warmup)
+
+import logging
+logger = logging.getLogger("pytorch_lightning.bert")
+
 
 __all__ = ['BertMNLIFinetuner']
 
@@ -28,6 +33,8 @@ class BertMNLIFinetuner(pl.LightningModule):
     def __init__(self,
                  ep: Param,
                  fold=None,
+                 feature_dim=None,
+                 max_epoch=50,
                  learning_rate=2e-5,
                  adam_epsilon=1e-8,
                  warmup_steps=0,
@@ -47,7 +54,7 @@ class BertMNLIFinetuner(pl.LightningModule):
         self.limit = ep.limit
         self.dnn = ep.dnn
         self.auxiliary = ep.auxiliary
-        
+        self.max_epoch = max_epoch
         self.twdata = TwitterData(
             settings.data, ep.pretrain_model,tree=ep.tree,split_type=ep.split_type,max_tree_length=ep.max_tree_len,limit=ep.limit)
         
@@ -60,8 +67,13 @@ class BertMNLIFinetuner(pl.LightningModule):
         else:
             raise ValueError(f'classifier_type {self.classifier_type} is incorrect!')
         self.reduction = ep.reduction
-        self.feature_dim = self.twdata.feature_dim
+        if feature_dim:
+            self.feature_dim = feature_dim
+        else:
+            self.feature_dim = self.twdata.featue_dim
+        
         self.num_classes = self.twdata.n_class
+        logger.info('self.num_classes {}'.format(self.num_classes))
 
         self._create_model()
         self.freeze_layer(self.freeze_type)
@@ -94,18 +106,92 @@ class BertMNLIFinetuner(pl.LightningModule):
                 self.tree_hidden_dim = self.feature_dim*self.max_tree_length//4
             elif tree_nn_type == 'CNN':
                 self.tree_layer = nn.Sequential(
+                    nn.Unflatten(1, (1,self.feature_dim*self.max_tree_length)),                # b,1,self.feature_dim*self.max_tree_length
+                    nn.BatchNorm1d(1),                       
+                    nn.Conv1d(1,8,kernel_size=3,stride=2),  # b,8,self.feature_dim*self.max_tree_length//2
+                    nn.AvgPool1d(3,2),                      # b,8,self.feature_dim*self.max_tree_length//4
+                    nn.ReLU(True),
+                    nn.BatchNorm1d(8),
+                    nn.Conv1d(8,16,kernel_size=3,stride=2), # b,16,self.feature_dim*self.max_tree_length//8
+                    nn.ReLU(True),
+                    nn.Flatten(1,-1),
+                )
+                self.tree_hidden_dim = (self.feature_dim*self.max_tree_length//8-1)*16
+            elif tree_nn_type == 'CNN_test':
+                self.tree_layer = nn.Sequential(
                                 nn.Unflatten(1, (1,self.feature_dim*self.max_tree_length)),                # b,1,self.feature_dim*self.max_tree_length
                                 nn.BatchNorm1d(1),                       
                                 nn.Conv1d(1,8,kernel_size=3,stride=2),  # b,8,self.feature_dim*self.max_tree_length//2
                                 nn.AvgPool1d(3,2),                      # b,8,self.feature_dim*self.max_tree_length//4
-                                nn.ReLU(True),
                                 nn.BatchNorm1d(8),
+                                nn.ReLU(True),
                                 nn.Conv1d(8,16,kernel_size=3,stride=2), # b,16,self.feature_dim*self.max_tree_length//8
+                                nn.BatchNorm1d(16),
                                 nn.ReLU(True),
                                 nn.Flatten(1,-1),
                             )
 
                 self.tree_hidden_dim = (self.feature_dim*self.max_tree_length//8-1)*16
+            elif tree_nn_type == 'CNN_test1':
+                self.tree_layer = nn.Sequential(
+                                nn.Unflatten(1, (1,self.feature_dim*self.max_tree_length)),                # b,1,self.feature_dim*self.max_tree_length
+                                nn.BatchNorm1d(1),                       
+                                nn.Conv1d(1,8,kernel_size=3,stride=2),  # b,8,self.feature_dim*self.max_tree_length//2
+                                nn.BatchNorm1d(8),
+                                nn.ReLU(True),
+                                nn.AvgPool1d(3,2),                      # b,8,self.feature_dim*self.max_tree_length//4
+                                nn.Conv1d(8,16,kernel_size=3,stride=2), # b,16,self.feature_dim*self.max_tree_length//8
+                                nn.BatchNorm1d(16),
+                                nn.ReLU(True),
+                                nn.Flatten(1,-1),
+                            )
+
+                self.tree_hidden_dim = (self.feature_dim*self.max_tree_length//8-1)*16
+            elif tree_nn_type == 'CNN_test2':
+                self.tree_layer = CNN(self.feature_dim, self.max_tree_length)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type == 'CNN_test3':
+                self.tree_layer = CNN_(self.feature_dim, self.max_tree_length)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type == 'CNNOri':
+                self.tree_layer = CNNOri(self.feature_dim,self.max_tree_length,fst_p=16)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNAVG':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = CNN_AVG(self.feature_dim,self.max_tree_length,fst_p=fst_c,dropout=False)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNDEP':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = CNN_DEP(self.feature_dim,self.max_tree_length,fst_p=fst_c,dropout=False)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNTK':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = CNN_TK(self.feature_dim,self.max_tree_length,fst_p=fst_c,dropout=False)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNTKF':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = CNN_TKF(self.feature_dim,self.max_tree_length,fst_p=fst_c,dropout=False)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNOK':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = CNN_OK(self.feature_dim,self.max_tree_length,fst_p=fst_c,dropout=False)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNFIX':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = CNN_FIX(self.feature_dim,self.max_tree_length,fst_p=fst_c,dropout=False)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'CNNRes':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = PTCNN(self.feature_dim,self.max_tree_length,fst_p=fst_c,blocks=2,pool='adaptive')
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type == 'FCN':
+                self.tree_layer = FCN(self.feature_dim, self.max_tree_length)
+                self.tree_hidden_dim = self.tree_layer.out_dim
+            elif tree_nn_type.split('_')[0] == 'PTCNN':
+                fst_c = int(tree_nn_type.split('_')[1])
+                self.tree_layer = PTCNN(self.feature_dim, self.max_tree_length, fst_c, pool='global')
+                self.tree_hidden_dim = self.tree_layer.out_dim
+
             elif tree_nn_type == 'LSTM':
                 self.tree_hidden_dim = 100
                 self.lstm1_num_layers = 3
@@ -113,21 +199,25 @@ class BertMNLIFinetuner(pl.LightningModule):
                                 nn.Unflatten(1,(self.max_tree_length,self.feature_dim)),
                                 nn.LSTM(self.feature_dim, self.tree_hidden_dim,num_layers=self.lstm1_num_layers,batch_first=True),
                             )
-
+            
+            logger.debug(f'_create_model classifier1 tree_hidden_dim {self.tree_hidden_dim} {tree_nn_type}')
             self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
             # self.classifier1 = self.make_classifier(self.tree_hidden_dim,self.layer_num)
 
+        logger.debug(f'_create_model classifier tree_hidden_dim {self.tree_hidden_dim} self.bert.config.hidden_size {self.bert.config.hidden_size}')
         self.classifier = self.make_classifier(self.bert.config.hidden_size+self.tree_hidden_dim,self.layer_num)
 
     def make_classifier(self, hidden_size, layer_num=1):
         layers = []
         sz = hidden_size
+        
         for l in range(layer_num-1):
             layers += [nn.Linear(sz, sz//2)]
             layers += [nn.ReLU(True)]
             layers += [nn.Dropout()]
             sz //= 2
         
+        layers += [nn.Dropout(0.5)]
         layers += [nn.Linear(sz, self.num_classes)]
         return nn.Sequential(*layers)
 
@@ -182,7 +272,7 @@ class BertMNLIFinetuner(pl.LightningModule):
             return logits
 
     def prepare_data(self) -> None:
-        print('prepare_data called')
+        logger.debug('prepare_data called')
         self.twdata.prepare_data()
         self.twdata.setup()
 
@@ -308,7 +398,7 @@ class BertMNLIFinetuner(pl.LightningModule):
                     path = os.path.join('./features/',fn)
                     with open(path, 'wb') as f:
                         np.save(f, n_dataset)
-                        print(f'save fea_map to {path}')
+                        logger.info(f'save fea_map to {path}')
             else:
                 fea_map = torch.cat([x['fea_map'] for x in outputs]).cpu().detach().numpy()
                 labels = torch.cat([x['labels'] for x in outputs]).cpu().detach().numpy()
@@ -318,25 +408,26 @@ class BertMNLIFinetuner(pl.LightningModule):
                 path = os.path.join('./features/',fn)
                 with open(path, 'wb') as f:
                     np.save(f, n_dataset)
-                    print(f'save fea_map to {path}')
+                    logger.info(f'save fea_map to {path}')
 
     def configure_optimizers(self):
         if self.tree != 'none':
             optimizer1 = AdamW([
                         {'params': self.bert.parameters(), 'lr': 2e-5},
-                        {'params': self.classifier.parameters(), 'lr':1e-3},
-                        {'params': self.classifier1.parameters(), 'lr':1e-3},
-                        {'params': self.tree_layer.parameters(), 'lr': 1e-3}
+                        {'params': self.classifier.parameters(), 'lr':1e-3,'weight_decay':1e-2},
+                        {'params': self.classifier1.parameters(), 'lr':1e-3,'weight_decay':1e-2},
+                        {'params': self.tree_layer.parameters(), 'lr': 1e-3,'weight_decay':1e-2}
                     ],
-                lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
+                eps=self.hparams.adam_epsilon)
         else:
             optimizer1 = AdamW([
                         {'params': self.bert.parameters(), 'lr': 2e-5},
-                        {'params': self.classifier.parameters(), 'lr':1e-3},
+                        {'params': self.classifier.parameters(), 'lr':1e-3,'weight_decay':1e-2},
                     ],
                 lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
         scheduler_cosine = get_linear_schedule_with_warmup(optimizer1
-                ,num_warmup_steps=4,num_training_steps=50)
+                ,num_warmup_steps=self.max_epoch//10, num_training_steps=self.max_epoch)
+        #scheduler_cosineAnnealing = CosineAnnealingLR(optimizer1,50)
         #scheduler1 = StepLR(optimizer=optimizer1, step_size=7, gamma=0.1)
         scheduler = {
             'scheduler': scheduler_cosine,
@@ -378,7 +469,7 @@ class BertMNLIFinetuner(pl.LightningModule):
         return optimizers, schedulers
 
     def setup(self, stage):
-        print('setup called')
+        logger.debug('setup called')
         pass
 
     def train_dataloader(self):

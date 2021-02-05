@@ -3,7 +3,7 @@ import os
 
 class Status():
     def __init__(self):
-        self.db_name = 'status_bert.db'
+        self.db_name = 'status_param.db'
         self.timeout = 10000
         lite.register_adapter(bool,int)
         lite.register_converter('bool',lambda v: int(v) != 0)
@@ -21,21 +21,18 @@ class Status():
             cur.execute('begin')
             cur.execute(
                 '''
-                insert into results (dnn,fold,SplitType,MaxLen,acc,c1,c2,c3,c4,BestEpoch) 
-                values (?,?,?,?,?,?,?,?,?,?) 
-                on conflict(dnn,fold,SplitType,MaxLen) 
+                insert into results (exp,maxlen,splittype,dnn,pretrain,aux,fold,acc,c1,c2,c3,c4,stopepoch,bestepoch) 
+                values (?,?,?,?,?,?,?,?,?,?,?,?,?,?) 
+                on conflict(exp,maxlen,splittype,dnn,pretrain,aux,fold) 
                 do update 
-                    set acc=excluded.acc,c1=excluded.c1,c2=excluded.c2,c3=excluded.c3,c4=excluded.c4,BestEpoch=excluded.BestEpoch
+                    set acc=excluded.acc,c1=excluded.c1,c2=excluded.c2,c3=excluded.c3,c4=excluded.c4
                         where acc < excluded.acc;
                 ''',
-            (p['dnn'],int(p['fold']),p['SplitType'],p['MaxLen'],p['acc'],p['c1'],p['c2'],p['c3'],p['c4'],int(p['CurEpoch'])))
+            (
+                p['exp'],p['maxlen'],p['splittype'],p['dnn'],p['pretrain'],p['aux'],
+                int(p['fold']),p['acc'],p['c1'],p['c2'],p['c3'],p['c4'],p['stopepoch'],p['bestepoch'])
+            )
             
-            cur.execute('''
-                update results
-                    set CurEpoch=?, ok=?
-                        where dnn=? and fold=? and SplitType=? and MaxLen=?;
-            ''', (int(p['CurEpoch']),p['ok'],p['dnn'],int(p['fold']),p['SplitType'],p['MaxLen']))
-        
             conn.commit()
         except lite.Error as e:
             print('[save_status] error', e.args[0])
@@ -53,9 +50,9 @@ class Status():
             cur.execute('PRAGMA busy_timeout=%d' % (self.timeout))
             cur.execute(
                 '''
-                select * from results where dnn=? and fold=? and SplitType=? and MaxLen=?;
+                select * from results where dnn=? and fold=? and splittype=? and maxlen=?;
                 ''',
-                (p['dnn'],p['fold'],p['SplitType'],p['MaxLen'])
+                (p['dnn'],p['fold'],p['splittype'],p['maxlen'])
             )
         
             res = cur.fetchone()
@@ -70,8 +67,8 @@ class Status():
 
 if __name__ == '__main__':
     ss = Status()
-    p = {'BestEpoch':-1,'CurEpoch':-1,'acc':-1,'c1':-1,'c2':-1,'c3':-1,'c4':-1,'dnn':'CNN','SplitType':'15_tv','fold':0,'MaxLen':100,'ok':False}
+    p = {'exp':1,'acc':-1,'c1':-1,'c2':-1,'c3':-1,'c4':-1,'dnn':'CNN','splittype':'15_tv','fold':0,'maxlen':100,'pretrain':'bert-base-cased','aux':True}
     ss.save_status(p)
-    param = {'dnn':'CNN','SplitType':'15_tv','fold':0,'MaxLen':100}
+    param = {'exp':1,'dnn':'CNN','splittype':'15_tv','fold':0,'maxlen':100,'pretrain':'bert-base-cased','aux':True}
     res = ss.read_status(param)
     print(res)

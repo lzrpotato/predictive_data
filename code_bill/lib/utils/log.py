@@ -13,7 +13,9 @@ def setup_custom_logger(name, filename):
     logfile = './logging/'+filename+'_'+t+'.log'
 
     formatter = logging.Formatter(
-        fmt='%(asctime)s - %(levelname)s - %(module)s - Ln%(lineno)d - %(message)s')
+        fmt='P:%(process)d-T:%(thread)d-%(asctime)s-%(levelname)s-%(filename)s-l%(lineno)d- %(message)s',
+        datefmt='%m/%d-%H:%M:%S'
+    )
 
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
